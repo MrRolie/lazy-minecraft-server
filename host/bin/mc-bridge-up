@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# mc-bridge-up: mc-server.service's ExecStartPost, whose failure the unit ignores ('-'), so nothing about the
+# bridge can stop Minecraft starting. It starts the Discord bridge:
+# - only behind its egress fence (the stamp mc-bridge-fence writes)
+# - never building at boot (--no-build: no network at boot must not mean a hung build)
+# - bounded by a timeout under the unit's TimeoutStartSec
+# - with an mc-alert when it does not start (rv3: this failure was silent)
+# No compose output goes into the alert or the log, because a malformed .env.bridge error can quote the
+# file. It does not watch health afterwards; `host/check.sh` requires the container healthy.
+set -uo pipefail
+
+STAMP=/run/mc-host/bridge-fence.ok
+ALERT=/usr/local/sbin/mc-alert
+DOCKER=/usr/bin/docker
+TIMEOUT=60   # < mc-server.service TimeoutStartSec (host/test_host.py pins it)
+
+fail() {
+  echo "mc-bridge-up: Discord bridge NOT started: $*" >&2
+  "$ALERT" "Discord bridge NOT started: $*" || echo "mc-bridge-up: mc-alert failed too" >&2
+  exit 1
+}
+
+[ -f "$STAMP" ] || fail "no egress fence (${STAMP} missing; see mc-bridge-fence.service)"
+/usr/bin/timeout "$TIMEOUT" "$DOCKER" compose up -d --no-build bridge >/dev/null 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "docker compose up -d --no-build bridge exited ${rc} (124 = timed out after ${TIMEOUT}s); run it by hand to see why, often a missing image (docker compose build bridge) or a malformed .env.bridge"
+echo "mc-bridge-up: bridge started (health: docker inspect --format '{{.State.Health.Status}}' minecraft-ai-host-bridge-1)"

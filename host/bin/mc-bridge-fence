@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# mc-bridge-fence: the host-side egress fence for the Discord bridge's network (br-mcve).
+#
+# WHY (rv2, proven on the workstation 2026-10-01): from the bridge container, the host-published game port answered on the
+# Docker gateway and on the host's LAN IP. The bridge needs the Internet (Discord). A compromised bridge could
+# therefore relay a stranger to 25565, and also whitelist that stranger, which gets around the Tailscale-only
+# access rule. The bridge needs nothing on this host, this LAN or the tailnet.
+#
+# HOW: raw-table PREROUTING, in-interface br-mcve (fixed in docker-compose.yml), destination in any loopback,
+# private, CGNAT (tailnet) or link-local range -> DROP. Raw sits before routing and DNAT, so this one anchor
+# covers both host-directed traffic (INPUT, including docker-proxy) and forwarded traffic (published ports
+# DNAT'd to a container IP, LAN, tailnet).
+# - Not DOCKER-USER: on a Tailscale host, FORWARD jumps to ts-forward FIRST, and its `-o tailscale0 -j ACCEPT`
+#   accepts tailnet-bound packets before DOCKER-USER ever sees them (seen on the workstation).
+# - Neither docker (which appends per-container rules to raw PREROUTING) nor tailscale reorders or flushes
+#   this chain.
+# - IPv6 from the bridge is dropped wholesale; the network is IPv4-only.
+# - The bridge resolves DNS through public resolvers (compose `dns:`), so dropping the LAN router costs nothing.
+#
+# Runs as root from mc-bridge-fence.service, ordered Before=docker.service so the rules exist before any
+# container with a restart policy comes back at boot. Idempotent. It writes the stamp $STAMP, without which
+# mc-server.service does not start the bridge.
+#
+# Usage: mc-bridge-fence apply | check | remove | print   (print needs no root: the interface and ranges)
+set -euo pipefail
+
+IFACE=br-mcve
+SUBNET=10.213.37.0/24   # = docker-compose.yml networks.discord (pinned by bridge/test_compose.py)
+CHAIN=MC_BRIDGE_FENCE
+STAMP_DIR=/run/mc-host
+STAMP="$STAMP_DIR/bridge-fence.ok"
+V4_BLOCK=(127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16)
+
+need_root() { [[ "$(id -u)" -eq 0 ]] || { echo "mc-bridge-fence: must run as root" >&2; exit 2; }; }
+
+check() {
+  local net ok=1
+  iptables -t raw -C PREROUTING -i "$IFACE" -j "$CHAIN" 2>/dev/null || { echo "FENCE missing: v4 jump from ${IFACE}"; ok=0; }
+  for net in "${V4_BLOCK[@]}"; do
+    iptables -t raw -C "$CHAIN" -d "$net" -j DROP 2>/dev/null || { echo "FENCE missing: v4 drop ${net}"; ok=0; }
+  done
+  ip6tables -t raw -C PREROUTING -i "$IFACE" -j DROP 2>/dev/null || { echo "FENCE missing: v6 drop from ${IFACE}"; ok=0; }
+  if [[ "$ok" -eq 1 ]]; then
+    echo "FENCE ok: ${#V4_BLOCK[@]} v4 ranges and all v6 dropped from ${IFACE} (raw PREROUTING)"
+    return 0
+  fi
+  rm -f "$STAMP"
+  return 1
+}
+
+# Every jump from the bridge interface into a fence chain (any generation), as chain names.
+_jumps() {
+  iptables -t raw -S PREROUTING | sed -nE "s/^-A PREROUTING -i ${IFACE} -j (${CHAIN}[A-Za-z0-9_]*)\$/\\1/p"
+}
+
+apply() {
+  # Fail-closed re-apply: a fresh staging chain is built and verified. Its jump goes in at position 1 while the
+  # old jump still stands, so there are never zero DROP paths. Only then are older generations retired and the
+  # new chain renamed into place.
+  local net old new
+  new="${CHAIN}_$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"  # chain names stay under 29 chars
+  rm -f "$STAMP"
+  iptables -t raw -N "$new"
+  for net in "${V4_BLOCK[@]}"; do iptables -t raw -A "$new" -d "$net" -j DROP; done
+  for net in "${V4_BLOCK[@]}"; do iptables -t raw -C "$new" -d "$net" -j DROP; done
+  iptables -t raw -I PREROUTING 1 -i "$IFACE" -j "$new"
+  for old in $(_jumps); do
+    [[ "$old" == "$new" ]] && continue
+    while iptables -t raw -C PREROUTING -i "$IFACE" -j "$old" 2>/dev/null; do
+      iptables -t raw -D PREROUTING -i "$IFACE" -j "$old"
+    done
+    iptables -t raw -F "$old"
+    iptables -t raw -X "$old"
+  done
+  if iptables -t raw -S "$CHAIN" >/dev/null 2>&1; then  # an unreferenced leftover of the canonical name
+    iptables -t raw -F "$CHAIN"
+    iptables -t raw -X "$CHAIN"
+  fi
+  iptables -t raw -E "$new" "$CHAIN"
+  ip6tables -t raw -C PREROUTING -i "$IFACE" -j DROP 2>/dev/null || ip6tables -t raw -I PREROUTING 1 -i "$IFACE" -j DROP
+  check
+  install -d -m 755 "$STAMP_DIR"
+  date -u +%FT%TZ > "$STAMP"
+  echo "FENCE stamp ${STAMP}"
+}
+
+remove() {  # attended teardown only: stop the bridge first
+  local c
+  for c in $(_jumps); do
+    while iptables -t raw -C PREROUTING -i "$IFACE" -j "$c" 2>/dev/null; do
+      iptables -t raw -D PREROUTING -i "$IFACE" -j "$c"
+    done
+  done
+  for c in $(iptables -t raw -S | sed -nE "s/^-N (${CHAIN}[A-Za-z0-9_]*)\$/\\1/p"); do
+    iptables -t raw -F "$c" 2>/dev/null || true
+    iptables -t raw -X "$c" 2>/dev/null || true
+  done
+  ip6tables -t raw -D PREROUTING -i "$IFACE" -j DROP 2>/dev/null || true
+  rm -f "$STAMP"
+  echo "FENCE removed"
+}
+
+case "${1:-}" in
+  print) printf 'iface %s\nsubnet %s\nstamp %s\n' "$IFACE" "$SUBNET" "$STAMP"; printf 'drop %s\n' "${V4_BLOCK[@]}" ;;
+  apply) need_root; apply ;;
+  check) need_root; check ;;
+  remove) need_root; remove ;;
+  *) echo "usage: mc-bridge-fence apply|check|remove|print" >&2; exit 2 ;;
+esac

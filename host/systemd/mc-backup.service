@@ -1,0 +1,14 @@
+[Unit]
+Description=Minecraft friend-server daily backup (world + server config + pack record)
+Documentation=file:///home/mm-mike/minecraft-ai-host/AGENTS.md
+# After mc-server: a Persistent= catch-up at boot must not tar the world while `compose up` starts it.
+# (That only orders against `up -d` returning; backup.sh itself waits until RCON answers.)
+After=docker.service mc-server.service
+OnFailure=mc-alert@%n.service
+
+[Service]
+Type=oneshot
+User=mm-mike
+WorkingDirectory=/home/mm-mike/minecraft-ai-host
+# Through bash so the script's file mode on the host does not matter. HOME comes from User=.
+ExecStart=/usr/bin/bash /home/mm-mike/minecraft-ai-host/deploy/backup.sh

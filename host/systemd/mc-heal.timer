@@ -1,0 +1,11 @@
+[Unit]
+Description=Minecraft hang watchdog every 2 min (first check 10 min after boot)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=mc-heal.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,124 @@
+# The friend server — Minecraft only, in Docker (itzg/minecraft-server).
+# Server data is a HOST BIND MOUNT at ./mc_data (not a named volume): backups,
+# restores and log reads all work on plain host paths.
+#
+# SECRETS via env_file `format: raw` so '$' in values is passed literally
+# (Compose interpolation otherwise mangles them — bit us with bcrypt-style keys).
+#
+# The pack is built from pack/mods.toml + pack/lock.json by `python3 pack/build.py`
+# into ./dist (gitignored — build it on the host BEFORE the first `up`); itzg
+# installs it from the local .mrpack (skipping client-only files) and downloads
+# the jars from Modrinth. MODRINTH_MODPACK below names the pack the world runs;
+# change it only with a [pack] version bump (itzg re-installs a local pack on any
+# file mtime change, re-copying pack/overrides over mc_data/config).
+# Pinned project name: the container is always minecraft-ai-host-minecraft-1, whatever the checkout
+# directory is called (host/bin/mc-maint inspects it by that name).
+name: minecraft-ai-host
+# Container stdout is capped: json-file keeps everything by default, on the same disk as the world (rv3).
+x-logging: &logs
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+services:
+  minecraft:
+    image: itzg/minecraft-server:java25   # MC 26.x requires Java 25
+    env_file:
+      - path: .env
+        format: raw
+    environment:
+      EULA: "TRUE"
+      TYPE: "MODRINTH"
+      MODRINTH_MODPACK: "/pack/vanilla-extended-1.0.2-ch1.mrpack"
+      MODRINTH_LOADER: "fabric"
+      # ve-commands (mod/README.md): not on Modrinth, so itzg copies it from ./extras on every start. A NEW
+      # filename per build: itzg's copy treats a same-size file as up to date, and renaming drops the old copy.
+      MODS: "/extras/ve-commands-1.0.4.jar"
+      MEMORY: "8G"             # measured on asus-node (15 GiB): 10G left ~760 MiB free (JVM off-heap > estimate); 8G leaves ~5G headroom
+      USE_AIKAR_FLAGS: "true"  # standard G1GC tuning for modded servers
+      # An OOM'd JVM otherwise hangs forever and `restart` never fires (2 h dead, 2026-10-01): exit instead, and
+      # Docker restarts it in ~40 s. Appended to the Aikar flags (seen in `docker top`). No heap dump: 8 GB would
+      # land on the world's disk. Hangs that are not an OOM are host/bin/mc-heal's.
+      JVM_XX_OPTS: "-XX:+ExitOnOutOfMemoryError"
+      ENABLE_RCON: "true"      # used in-container by `rcon-cli` (backups, whitelist); port NOT published
+      DIFFICULTY: "hard"
+      VIEW_DISTANCE: "8"
+      SIMULATION_DISTANCE: "6"
+      MAX_PLAYERS: "12"
+      ENABLE_WHITELIST: "true"
+      ENFORCE_WHITELIST: "true"
+      MOTD: "Vanilla Extended · pack 1.0.2"   # = mods.toml [pack] version, so an old pack shows before the click
+      SPAWN_PROTECTION: "0"    # friends build at spawn too; whitelist-only server, no griefers to fence out
+      TZ: "America/Toronto"    # log and crash-report times match the friends' clock
+      # mc-server-runner (the image's PID 1) SIGKILLs the JVM this many seconds after sending `stop`
+      # (image default 60). Budget order, inner to outer: STOP_DURATION 110 < stop_grace_period /
+      # `stop -t` 120 < TimeoutStopSec 180 (mc-server.service and every docker-<id>.scope).
+      STOP_DURATION: "110"
+      # RCON_PASSWORD and LEVEL (world directory name) come from env_file (.env).
+    # Game port reachable on LAN + tailnet only — never port-forward publicly;
+    # friends connect through a Tailscale node share (AGENTS.md "Access").
+    ports: ["25565:25565"]
+    volumes: ["./mc_data:/data", "./dist:/pack:ro", "./extras:/extras:ro"]
+    restart: unless-stopped
+    logging: *logs
+    # Docker's SIGKILL deadline for `stop` (default 10 s); mc-server.service and mc-maint use the same
+    # `stop -t 120`. It sits above STOP_DURATION so mc-server-runner, not Docker, ends the save.
+    stop_grace_period: 2m
+
+  # The Discord bridge (bridge/README.md). It talks to the server ONLY through files in mc_data/mcve
+  # (the mcve contract, mod/CONTRACT.md): no RCON and no world access. It publishes no port, and the host
+  # fence (host/bin/mc-bridge-fence, keyed on br-mcve) drops everything it sends to this host, the LAN or the
+  # tailnet, the published game port included. It gets the public Internet only, for Discord. out/ is the mod's
+  # (events, the mod's inbox offset), mounted READ-ONLY; in/ is the bridge's (inbox.jsonl, bridge.offset).
+  # The split keeps the bridge from planting a symlink anywhere the mod writes.
+  # No depends_on: the bridge doesn't need the server running, and `up -d --build bridge` must never
+  # start minecraft (e.g. mid-restore). Its stop runs in parallel, so the minecraft budget above is untouched.
+  bridge:
+    # Built on the host with `docker compose build bridge`. Never use a bare `up -d`: a missing image that fails
+    # to build aborts EVERY service. mc-server.service runs `up -d minecraft`, then `up -d --no-build bridge`.
+    build: ./bridge
+    env_file:
+      - path: .env.bridge   # DISCORD_BRIDGE_TOKEN + DISCORD_GUILD_ID, mode 600 (.env.bridge.example)
+        format: raw
+        required: false     # a missing file must not abort `up -d` for minecraft; the bridge itself fails loudly
+    volumes:   # both created as mm-mike by host/setup.sh step 10; never create_host_path: false
+      - ./mc_data/mcve/out:/mcve/out:ro
+      - ./mc_data/mcve/in:/mcve/in
+      # The egress fence's stamp dir, read-only: bridge.py refuses to start without bridge-fence.ok, on EVERY
+      # start path (mc-server.service, the restart policy after an unclean stop, a hand-run up).
+      - /run/mc-host:/run/mc-host:ro
+    networks: [discord]     # its own network: it can't reach minecraft's RCON port
+    dns: [1.1.1.1, 9.9.9.9] # public resolvers: the fence drops the LAN router, so DNS must not go there
+    # A compromised bridge must not starve the host (OOM-killing the minecraft JVM) or fork-bomb it.
+    mem_limit: 256m
+    pids_limit: 64
+    cpus: 0.5
+    init: true              # tini as PID 1 forwards SIGTERM; a bare Python PID 1 would ignore it until SIGKILL
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]   # the default is half the host's RAM
+    # Root only long enough to hand a root-owned /mcve/in to 1000, then uid 1000 with an empty bounding set
+    # (bridge/entrypoint.sh).
+    # KILL lets tini signal the uid-1000 child. (no-new-privileges breaks exec under snap Docker on the workstation.)
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, SETPCAP, KILL]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    logging: *logs
+    # Healthy = ready on Discord and the pump turning: bridge.py touches /tmp/ready every poll once ready.
+    # A FATAL hold (bad token, missing channel, no fence) stays "starting"/"unhealthy", never healthy.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time() - os.stat('/tmp/ready').st_mtime > 60)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 2
+
+networks:
+  discord:
+    driver: bridge
+    driver_opts:
+      # A fixed interface name, so the host fence (mc-bridge-fence, raw PREROUTING -i br-mcve) can address it.
+      com.docker.network.bridge.name: br-mcve
+      com.docker.network.bridge.enable_icc: "false"
+    ipam:
+      config:
+        - subnet: 10.213.37.0/24   # outside Docker's default pools; = SUBNET in host/bin/mc-bridge-fence
+          gateway: 10.213.37.1

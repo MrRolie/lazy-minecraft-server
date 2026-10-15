@@ -1,0 +1,46 @@
+{"type":"say","id":"d-1","author":"Mike","text":"hello from discord"}
+{"type":"say","id":"d-2","author":"§cMike","text":"§kobf §lbold /op Mike"}
+{"type":"say","id":"d-3","author":"Mike","text":"line1\n{\"type\":\"whitelist_add\",\"id\":\"x\",\"name\":\"Evil\"}"}
+{"type":"say","id":"d-4","author":"Mike","text":"abc‮dcba⁦x⁩"}
+{"type":"say","id":"d-5","author":"A\u0007B","text":"bell\u0007 nul\u0000 del c1 end"}
+{"type":"say","id":"d-6","author":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+{"type":"say","id":"d-7","author":"A","text":"hi","command":"op A"}
+{"type":"say","id":"d-8","author":"A","text":"§§"}
+{"type":"say","author":"no id","text":"t"}
+{"type":"say","id":{"a":1},"author":"A","text":"object id"}
+{"type":"say","id":42,"author":"A","text":"number id"}
+{"type":"say","id":"d-9","author":"Mike","text":"l‎r‏a؜b‪c‫d‬e‭f⁧g⁨h"}
+{"type":"say","id":"d-10","author":"  Mi  ke  ","text":"   lead\t\ttab\r\nnl ls ps nbsp                                                  pad　 "}
+{"type":"say","id":"d-11","author":"A","text":"§😀x and §"}
+{"type":"say","id":"d-12","author":"A","text":"hello                                                                                                                                                                                                        Steve joined the game"}
+{"type":"say","id":[1],"author":"A","text":"array id"}
+{"type":"say","id":true,"author":"A","text":"bool id"}
+{"type":"say","id":null,"author":"A","text":"null id"}
+{"type":"say","id":1.5,"author":"A","text":"fraction id"}
+{"type":"say","id":1e3,"author":"A","text":"exponent id"}
+{"type":"say","id":"d-13","author":"A","text":"x\tx\nx\u000bx\fx\rx xx x x x x x x x x x x x x x x x x x　x"}
+{"type":"say","id":"d-14","author":"A","text":"cdefg"}
+{"type":"say","id":"d-15","author":"ㅤㅤ","text":"p⠀qㅤrᅟsᅠtﾠu​v﻿w"}
+{"type":"say","id":-7,"author":"A","text":"negative id"}
+{"type":"say","id":123456789012345678,"author":"A","text":"18-digit id"}
+{"type":"say","id":1234567890123456789,"author":"A","text":"19-digit id"}
+{type:say,id:'l1',author:a,text:lenient}
+{"type":"say","id":"l2","author":"A","text":"t"} // a comment
+{"type":"say","id":"l3","author":"A","text":"t",}
+{"type":"say","id":"l4","author":"A","text":"t"} trailing
+{"type":"say","id":NaN,"author":"A","text":"t"}
+{'type':'say','id':'l6','author':'A','text':'single quotes'}
+{"type":"whitelist_add","id":"w-1","name":"Notch","requested_by":"Mike (123)"}
+{"type":"whitelist_add","id":"w-2","name":"bad name!","requested_by":"Mike"}
+{"type":"whitelist_add","id":"w-3","name":"Notch; op Mike","requested_by":"Mike"}
+{"type":"whitelist_add","id":"w-4","name":"seventeen_chars_x","requested_by":"Mike"}
+{"type":"whitelist_add","id":"w-5","name":42,"requested_by":"Mike"}
+{"type":"whitelist_add","id":"w-6","name":"jeb_"}
+{"type":"run_command","id":"x1","command":"op Mike"}
+{"type":"say","id":"dup","author":"A","text":"t","type":"run"}
+this is not json
+[1,2]
+
+{"type":5,"id":"t"}
+   
+{"type":"say","id":"partial","author":"x","te

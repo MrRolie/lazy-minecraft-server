@@ -1,0 +1,14 @@
+[Unit]
+Description=asus-node network watchdog (link fault: nmcli up / tailscaled / reboot; upstream fault: idle tailscaled restart)
+Documentation=file:///home/mm-mike/minecraft-ai-host/AGENTS.md
+After=NetworkManager.service tailscaled.service
+# A crashing watchdog must not be silent (the alert lands once the network allows).
+OnFailure=mc-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mc-netwatch
+# Creates /var/lib/mc-host (the episode state lives there).
+StateDirectory=mc-host
+# Long enough for the reboot rung's worst case: probe + mc-maint (docker/pgrep, rcon, stop -t 120, alert).
+TimeoutStartSec=10min

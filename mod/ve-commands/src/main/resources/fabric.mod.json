@@ -1,0 +1,19 @@
+{
+	"schemaVersion": 1,
+	"id": "ve-commands",
+	"version": "${version}",
+	"name": "VE Commands",
+	"description": "Vanilla Extended friend server: /discovery and /coords, plus the mcve file bridge to Discord (mod/CONTRACT.md).",
+	"authors": ["mm-mike"],
+	"license": "All-Rights-Reserved",
+	"environment": "server",
+	"entrypoints": {
+		"server": ["net.vanillaextended.vecommands.VeCommands"]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.1.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

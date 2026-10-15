@@ -1,0 +1,133 @@
+#!/usr/bin/python3
+"""mc-alert: best-effort Discord webhook alert from asus-node.
+
+    mc-alert "<message>"     post a message
+    mc-alert --unit <unit>   post "<unit> failed on <host>" plus that unit's last journal lines
+                             (what mc-alert@.service runs, via OnFailure=mc-alert@%n.service)
+
+The webhook URL is read from /etc/mc-host/webhook (root:mm-mike 0640). It is a secret: it never
+lands in the repo and is never logged. Alerts are best-effort: a missing file, a bad URL or a
+network error is logged and the exit code is still 0, so an alert can never break its caller.
+python3 stdlib only (curl is not in the Ubuntu 24.04 desktop manifest).
+"""
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import urllib.request
+
+WEBHOOK_FILE = os.environ.get("MC_WEBHOOK_FILE", "/etc/mc-host/webhook")
+WEBHOOK_PREFIXES = ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
+LIMIT = 1900  # Discord caps content at 2000 chars; keep a margin
+JOURNAL_LINES = 25
+
+
+def stderr_is_journal(journal_stream=None, fd=2):
+    """True only if fd 2 IS the journal stream systemd handed us (JOURNAL_STREAM=<dev>:<inode>).
+
+    A caller that captures our stderr (mc-netwatch, mc-maint) inherits JOURNAL_STREAM too, so the
+    variable alone does not prove where stderr goes (systemd.exec(5) says to compare dev:inode).
+    """
+    value = os.environ.get("JOURNAL_STREAM", "") if journal_stream is None else journal_stream
+    try:
+        dev, ino = (int(x) for x in value.split(":"))
+        st = os.fstat(fd)
+    except (ValueError, OSError):
+        return False
+    return (st.st_dev, st.st_ino) == (dev, ino)
+
+
+def log(msg):
+    print(f"mc-alert: {msg}", file=sys.stderr)
+    # Under systemd, stderr already lands in the journal; otherwise send it there too.
+    if not stderr_is_journal():
+        subprocess.run(["logger", "-t", "mc-alert", msg], check=False)
+
+
+def trim(text, limit=LIMIT):
+    """Cut text to at most `limit` chars, marking the cut."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def format_unit_failure(unit, host, journal, limit=LIMIT):
+    """'<unit> failed on <host>' plus as many of the LAST journal lines as fit under `limit`."""
+    head = f"**{unit} failed on {host}**"
+    fence_open, fence_close = "\n```\n", "\n```"
+    budget = limit - len(head) - len(fence_open) - len(fence_close)
+    lines = [ln for ln in journal.splitlines() if ln.strip()]
+    kept = []
+    for ln in reversed(lines):  # newest lines matter most: fill from the end
+        ln = ln[:budget]
+        if sum(len(k) + 1 for k in kept) + len(ln) > budget:
+            break
+        kept.insert(0, ln)
+    if not kept:
+        return trim(head, limit)
+    return head + fence_open + "\n".join(kept) + fence_close
+
+
+def read_webhook(path=WEBHOOK_FILE):
+    """The webhook URL, or None (logged) if the file is missing, unreadable or not a Discord webhook."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            url = fh.read().strip()
+    except OSError as exc:
+        log(f"no webhook ({path}: {exc.strerror}); alert not sent")
+        return None
+    if not url.startswith(WEBHOOK_PREFIXES):
+        log(f"{path} does not hold a Discord webhook URL; alert not sent")
+        return None
+    return url
+
+
+def post(url, content):
+    body = json.dumps({"content": content, "allowed_mentions": {"parse": []}}).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        # Discord's edge rejects urllib's default User-Agent.
+        headers={"Content-Type": "application/json", "User-Agent": "mc-host-alert/1"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status
+
+
+def unit_journal(unit):
+    res = subprocess.run(
+        ["journalctl", "-u", unit, "-n", str(JOURNAL_LINES), "--no-pager", "-o", "cat"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    return res.stdout
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Best-effort Discord alert from asus-node.")
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("message", nargs="?", help="alert text")
+    group.add_argument("--unit", help="report this unit as failed, with its last journal lines")
+    args = ap.parse_args(argv)
+    host = socket.gethostname()
+
+    try:
+        if args.unit:
+            content = format_unit_failure(args.unit, host, unit_journal(args.unit))
+        else:
+            content = trim(f"[{host}] {args.message}")
+        log(f"alert: {content.splitlines()[0]}")
+        url = read_webhook()
+        if url is None:
+            return 0
+        status = post(url, content)
+        log(f"posted (HTTP {status})")
+    except Exception as exc:  # best-effort: never break the caller
+        log(f"alert not sent: {type(exc).__name__}: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

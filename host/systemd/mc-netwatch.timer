@@ -1,0 +1,11 @@
+[Unit]
+Description=Network watchdog every 2 min (first check 5 min after boot)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=mc-netwatch.service
+
+[Install]
+WantedBy=timers.target

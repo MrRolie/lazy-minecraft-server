@@ -1,0 +1,11 @@
+[Unit]
+Description=Maintenance reboot check daily at 05:40 (after the 05:00 upgrades and 05:00-05:30 snap window)
+
+[Timer]
+OnCalendar=*-*-* 05:40:00
+AccuracySec=1min
+# No Persistent=: a missed 05:40 must not turn into a reboot at some random boot-time hour.
+Unit=mc-maint.service
+
+[Install]
+WantedBy=timers.target

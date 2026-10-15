@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Commit-confirm for the wired static IP (host/setup.sh step 2 arms it; root only).
+#
+#   mc-net-commit apply CONN IP GW DEADLINE
+#       Bring CONN up with its already-modified ipv4 settings, then confirm it with FRESH evidence and
+#       disarm the rollback (mc-net-rollback.timer). DEADLINE is the epoch second the rollback fires;
+#       nothing is attempted later than DEADLINE - 20 s. Confirmed = 3 consecutive healthy checks
+#       spanning >= 15 s, each one:
+#         - IP is the device's ONLY IPv4 address
+#         - GW answers ping sourced from IP (`ping -I IP`) AND ping bound to the wired device
+#           (`ping -I DEV`; a source address alone does not pin the egress interface, and Wi-Fi on the
+#           same subnet could carry it)
+#         - Tailscale reports Online (a sanity check only: that flag can be stale from before the change)
+#       Exit 0 confirmed; 1 not confirmed in time (the rollback fires); 4 the rollback already fired
+#       (reported FAILED, never "confirmed").
+#   mc-net-commit rollback
+#       Restore the ipv4 settings saved in /var/lib/mc-host/wired-ipv4.prev and bring the connection up
+#       (what mc-net-rollback.service runs). It first leaves a marker, so `apply` can tell it ran.
+#
+# setup.sh runs `apply` as a transient system unit (systemd-run --wait), not inline: the maintainer's
+# SSH session rides this NIC and can die when the address moves, and that must not kill the confirm.
+set -euo pipefail
+
+PREV="${MC_NET_PREV:-/var/lib/mc-host/wired-ipv4.prev}"  # written by setup.sh (host/lib/net.sh write_prev)
+FIRED="${MC_NET_FIRED:-/var/lib/mc-host/net-rollback.fired}"  # setup.sh clears it before arming
+MARGIN=20        # stop trying this many seconds before the rollback fires
+STREAK=3         # consecutive healthy checks...
+STREAK_SECS=15   # ...spanning at least this long
+EXIT_FIRED=4
+
+log() { echo "mc-net-commit: $*"; }
+now() { date +%s; }
+
+# healthy DEV IP GW
+healthy() {
+  local addrs
+  addrs="$(ip -4 -o addr show dev "$1" | awk '{ print $4 }' | xargs)"
+  [ "${addrs%/*}" = "$2" ] || { log "check: ${1} IPv4 is '${addrs}', want only ${2}"; return 1; }
+  ping -c2 -W1 -I "$2" "$3" >/dev/null 2>&1 || { log "check: ${3} does not answer from source ${2}"; return 1; }
+  ping -c2 -W1 -I "$1" "$3" >/dev/null 2>&1 || { log "check: ${3} does not answer through ${1}"; return 1; }
+  timeout 5 tailscale status --json 2>/dev/null \
+    | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("Self", {}).get("Online") is True else 1)' \
+    || { log "check: Tailscale not online"; return 1; }
+}
+
+# rollback_ran: the rollback service started (marker, or systemd saw it start).
+rollback_ran() {
+  [ -e "$FIRED" ] && return 0
+  [ "$(systemctl show -p ExecMainStartTimestampMonotonic --value mc-net-rollback.service)" != 0 ]
+}
+
+# disarm: stop the rollback timer only if it provably has not fired, before or during the stop.
+disarm() {
+  if ! systemctl is-active --quiet mc-net-rollback.timer || rollback_ran; then
+    log "FAILED: the rollback already fired (or its timer is gone); NOT confirmed"
+    exit "$EXIT_FIRED"
+  fi
+  systemctl stop mc-net-rollback.timer
+  if rollback_ran; then
+    log "FAILED: the rollback started while being disarmed; NOT confirmed"
+    exit "$EXIT_FIRED"
+  fi
+}
+
+case "${1:-}" in
+  apply)
+    [ $# -eq 5 ] || { echo "usage: mc-net-commit apply CONN IP GW DEADLINE" >&2; exit 2; }
+    conn=$2 ip=$3 gw=$4 cutoff=$(($5 - MARGIN))
+    left=$((cutoff - $(now)))
+    if [ "$left" -le 0 ]; then
+      log "no time left before the rollback deadline; the rollback will fire"
+      exit 1
+    fi
+    if ! nmcli --wait "$left" connection up "$conn"; then
+      log "nmcli connection up '${conn}' failed; the rollback stays armed"
+      exit 1
+    fi
+    dev="$(nmcli -g GENERAL.DEVICES connection show "$conn")"
+    streak=0 since=0
+    while [ "$(now)" -lt "$cutoff" ]; do
+      if healthy "$dev" "$ip" "$gw"; then
+        t="$(now)"
+        [ "$streak" -eq 0 ] && since=$t
+        streak=$((streak + 1))
+        if [ "$streak" -ge "$STREAK" ] && [ $((t - since)) -ge "$STREAK_SECS" ] && [ "$t" -lt "$cutoff" ]; then
+          disarm
+          log "confirmed: '${conn}' on ${dev} is only ${ip}; ${gw} answered ${streak} checks over $((t - since)) s; rollback disarmed"
+          exit 0
+        fi
+      else
+        streak=0
+      fi
+      sleep 5
+    done
+    log "NOT confirmed by $((MARGIN)) s before the rollback deadline; the rollback will fire"
+    exit 1
+    ;;
+  rollback)
+    : >"$FIRED"
+    declare -A prev=()
+    while IFS='=' read -r k v; do
+      prev[$k]=$v
+    done <"$PREV"
+    log "restoring '${prev[conn]}': method=${prev[method]} addresses='${prev[addresses]}' gateway='${prev[gateway]}' dns='${prev[dns]}'"
+    nmcli connection modify "${prev[conn]}" ipv4.method "${prev[method]}" ipv4.addresses "${prev[addresses]}" \
+      ipv4.gateway "${prev[gateway]}" ipv4.dns "${prev[dns]}"
+    nmcli connection up "${prev[conn]}"
+    log "rolled back"
+    ;;
+  *)
+    echo "usage: mc-net-commit apply CONN IP GW DEADLINE | rollback" >&2
+    exit 2
+    ;;
+esac

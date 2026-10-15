@@ -1,0 +1,380 @@
+#!/usr/bin/python3
+"""mc-heal: restart a hung Minecraft server (mc-heal.timer, every 2 min from boot +10 min; runs as mm-mike).
+
+    mc-heal           one check + at most one heal
+    mc-heal --status  print the heal state as INFO/WARN lines (read-only; host/check.sh shows them)
+
+Why: an OOM'd or wedged JVM never exits, so `restart: unless-stopped` never fires (2 h dead on 2026-10-01).
+-XX:+ExitOnOutOfMemoryError (compose) turns an OOM into an exit Docker restarts; this covers every other hang.
+
+Liveness = `docker exec <container> rcon-cli list` answering within 30 s with a player count. RCON runs on the
+main game thread, so it sees what friends see (the healthcheck does not: AGENTS.md hard-won facts). The
+container is found by its compose labels, deploy/world.sh's filter; compose is never parsed.
+
+Skips (no probe, nothing counted, the heal history kept), in this order:
+  - the maintenance flag <repo>/maintenance exists (deploy/world.sh ring sets it; `world.sh maintenance on|off`)
+  - under 10 min since boot
+  - mc-backup.service is running (backup.sh waits on RCON itself), or systemctl can't say
+  - docker does not answer
+  - no running minecraft container: stopped or crash-looping is not "hung"; compose's restart policy and
+    mc-server.service own it
+  - under 10 min since the container started
+  - a heal within the last 30 min (cooldown)
+
+Heal after >= 3 consecutive failed probes spanning >= 6 min. A gap of more than 10 min since the last failure,
+or a new container start, begins a new streak; a good probe ends it. The heal:
+  1. save `docker logs --tail 2000` and mc_data/logs/latest.log into ~/archive/heal/<ts>/ (newest 20 kept)
+  2. docker compose stop -t 120 minecraft   (the stop budget: a JVM that can still save gets its chance)
+  3. docker compose up -d minecraft         (minecraft only: never the bridge, never a bare `up -d`)
+  4. mc-alert
+At most 2 heals per 6 h. Past that: one alert per streak, "mc-heal: cap reached, not restarting".
+State: /var/lib/mc-heal/state.json (StateDirectory); a file of the wrong shape is replaced by an empty one.
+
+MC_REPO and MC_COMPOSE_PROJECT (and MC_HEAL_STATE, MC_HEAL_ARCHIVE) exist for tests and rehearsal on a spike
+compose project only; mc-heal.service sets none of them.
+"""
+import argparse
+import calendar
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+REPO = os.environ.get("MC_REPO", "/home/mm-mike/minecraft-ai-host")
+PROJECT = os.environ.get("MC_COMPOSE_PROJECT", "minecraft-ai-host")  # compose `name:`
+STATE_FILE = os.environ.get("MC_HEAL_STATE", "/var/lib/mc-heal/state.json")
+ARCHIVE = os.environ.get("MC_HEAL_ARCHIVE", "/home/mm-mike/archive/heal")
+MAINT_FLAG = "maintenance"  # in REPO; = MAINT_FLAG in deploy/world.sh (host/test_host.py pins it)
+ALERT = "/usr/local/sbin/mc-alert"
+BUSY_STATES = {"active", "activating", "reloading", "deactivating"}  # a running oneshot reads `activating`
+
+MIN = 60
+RCON_TIMEOUT = 30
+SETTLE = 10 * MIN        # after boot, and after the container starts
+STREAK_FAILS = 3
+STREAK_SPAN = 6 * MIN
+STREAK_GAP = 10 * MIN    # longer than this since the last failure: a new streak
+COOLDOWN = 30 * MIN
+CAP = 2
+CAP_WINDOW = 6 * 3600
+LOG_LINES = 2000
+LATEST_LOG_MAX = 16 * 1024 ** 2  # bytes of latest.log kept (its tail)
+KEEP_LOG_DIRS = 20
+
+HEAL = "heal"
+CAPPED = "cap-reached"
+
+UNKNOWN, NOT_RUNNING = "unknown", "not-running"
+
+
+def log(msg):
+    print(f"mc-heal: {msg}", flush=True)
+
+
+# ---- pure -----------------------------------------------------------------------------------
+
+def parse_player_count(out):
+    """Players online from `rcon-cli list`, else None (same reply mc-maint reads)."""
+    m = re.search(r"There are (\d+) of a max", out or "")
+    return int(m.group(1)) if m else None
+
+
+def parse_started_at(s):
+    """docker's State.StartedAt (RFC 3339 UTC, nanoseconds) -> epoch seconds, or None."""
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", (s or "").strip())
+    if not m or m.group(1).startswith("0001-"):  # the zero time: never started
+        return None
+    return calendar.timegm(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S"))
+
+
+def recent_heals(now, state):
+    return [h for h in state.get("heals", []) if now - h < CAP_WINDOW]
+
+
+def skip_reason(now, flag, uptime, backup_busy, container, started, state):
+    """Why this run must not probe or heal, or None. Pure: every input is an observation.
+
+    flag: the maintenance flag's text, or None when absent; uptime: seconds since boot (None = unreadable);
+    container: an id, UNKNOWN (docker did not answer) or NOT_RUNNING; started: epoch of the container's start
+    (None = unreadable).
+    """
+    if flag is not None:
+        return f"maintenance flag set ({flag or 'no reason given'})"
+    if uptime is None:
+        return "cannot read the time since boot"
+    if uptime < SETTLE:
+        return f"{round(uptime / MIN)} min since boot (< {SETTLE // MIN})"
+    if backup_busy:
+        return "mc-backup.service is running (or systemctl could not say)"
+    if container == UNKNOWN:
+        return "docker did not answer"
+    if container == NOT_RUNNING:
+        return "no running minecraft container: not hung; compose's restart policy and mc-server own it"
+    if started is None:
+        return "cannot read when the container started"
+    if now - started < SETTLE:
+        return f"container started {round((now - started) / MIN)} min ago (< {SETTLE // MIN})"
+    heals = state.get("heals", [])
+    if heals and now - max(heals) < COOLDOWN:
+        return f"cooldown: healed {round((now - max(heals)) / MIN)} min ago (< {COOLDOWN // MIN})"
+    return None
+
+
+def decide(now, alive, started_at, state):
+    """(action or None, new_state, alert or None) after one probe. Pure; `state` is not mutated.
+
+    started_at: the container's raw StartedAt, so a new container start begins a new streak.
+    """
+    heals = recent_heals(now, state)
+    new = {"last_check": now, "heals": heals}
+    if alive:
+        return None, new, None
+    streak = state.get("streak")
+    if not streak or now - streak["last"] > STREAK_GAP or streak.get("started_at") != started_at:
+        streak = {"since": now, "count": 0, "started_at": started_at}
+    streak = {**streak, "count": streak["count"] + 1, "last": now}
+    span = now - streak["since"]
+    if streak["count"] < STREAK_FAILS or span < STREAK_SPAN:
+        return None, {**new, "streak": streak}, None
+    if len(heals) >= CAP:
+        if streak.get("cap_alerted"):
+            return None, {**new, "streak": streak}, None
+        alert = (f"mc-heal: cap reached, not restarting. RCON has not answered for {streak['count']} checks over "
+                 f"{round(span / MIN)} min; {len(heals)} heals in the last {CAP_WINDOW // 3600} h already. "
+                 "Look at the server by hand")
+        return CAPPED, {**new, "streak": {**streak, "cap_alerted": True}}, alert
+    # Recorded BEFORE acting: a heal that fails still counts toward the cap.
+    return HEAL, {**new, "heals": heals + [now], "healed_streak": streak}, None
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def valid_state(state):
+    if not isinstance(state, dict):
+        return False
+    if state.get("last_check") is not None and not _num(state["last_check"]):
+        return False
+    heals = state.get("heals", [])
+    if not isinstance(heals, list) or not all(_num(h) for h in heals):
+        return False
+    for key in ("streak", "healed_streak"):
+        s = state.get(key)
+        if s is None:
+            continue
+        if not (isinstance(s, dict) and all(_num(s.get(k)) for k in ("since", "last", "count"))
+                and (s.get("started_at") is None or isinstance(s["started_at"], str))):
+            return False
+    return True
+
+
+def status_lines(now, state, flag):
+    """(level, text) lines for --status."""
+    out = []
+    if flag is not None:
+        out.append(("WARN", f"maintenance flag set ({flag or 'no reason given'}): mc-heal is NOT guarding the "
+                            "server; clear it with deploy/world.sh maintenance off"))
+    heals = recent_heals(now, state)
+    last = max(state.get("heals") or [0]) or None
+    s = state.get("streak")
+    parts = [f"failing: {s['count']} check(s) over {round((now - s['since']) / MIN)} min" if s else "no failure streak",
+             f"{len(heals)} heal(s) in the last {CAP_WINDOW // 3600} h (cap {CAP})",
+             "last heal " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if last else "never")]
+    if state.get("last_check"):
+        parts.append(f"last probe {round((now - state['last_check']) / MIN)} min ago (skips do not count)")
+    out.append(("INFO", "heal state: " + "; ".join(parts)))
+    return out
+
+
+# ---- effects --------------------------------------------------------------------------------
+
+def run(cmd, timeout, cwd=None):
+    try:
+        res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return None, "", f"timed out after {timeout}s"
+    except OSError as exc:
+        return None, "", str(exc)
+    return res.returncode, res.stdout, res.stderr
+
+
+def read_flag():
+    path = os.path.join(REPO, MAINT_FLAG)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read(200).strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:  # it exists but can't be read: still a flag
+        return f"unreadable: {exc.strerror}"
+
+
+def uptime():
+    try:
+        with open("/proc/uptime", encoding="ascii") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def backup_busy():
+    rc, out, err = run(["systemctl", "show", "-p", "ActiveState", "--value", "mc-backup.service"], 15)
+    if rc != 0:
+        log(f"systemctl show mc-backup.service: exit {rc} {err.strip()[:200]}; treating as running")
+        return True
+    return out.strip() in BUSY_STATES
+
+
+def find_container():
+    """The running minecraft container's id (by compose labels, as deploy/world.sh), NOT_RUNNING or UNKNOWN."""
+    rc, out, err = run(["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={PROJECT}",
+                        "--filter", "label=com.docker.compose.service=minecraft", "--filter", "status=running"], 30)
+    if rc != 0:
+        log(f"docker ps: exit {rc} {err.strip()[:200]}")
+        return UNKNOWN
+    ids = out.split()
+    return ids[0] if ids else NOT_RUNNING
+
+
+def container_started(cid):
+    """(raw StartedAt, epoch) of the container; epoch None when unreadable."""
+    rc, out, err = run(["docker", "inspect", "-f", "{{.State.StartedAt}}", cid], 30)
+    if rc != 0:
+        log(f"docker inspect {cid}: exit {rc} {err.strip()[:200]}")
+        return None, None
+    return out.strip(), parse_started_at(out)
+
+
+def probe(cid):
+    """(alive, detail): RCON answered `list` with a player count inside RCON_TIMEOUT."""
+    rc, out, err = run(["docker", "exec", cid, "rcon-cli", "list"], RCON_TIMEOUT)
+    if rc == 0 and parse_player_count(out) is not None:
+        return True, out.strip()[:120]
+    return False, f"rcon-cli list: exit {rc} {(out + err).strip()[:200]!r}"
+
+
+def load_state(path=None):
+    path = path or STATE_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log(f"state unreadable ({exc}); starting fresh")
+        return {}
+    if not valid_state(state):
+        log(f"state has the wrong shape; starting fresh: {json.dumps(state)[:300]}")
+        return {}
+    return state
+
+
+def save_state(state, path=None):
+    path = path or STATE_FILE
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def save_logs(cid, now):
+    """Keep the evidence before the restart wipes the hung state. Returns (dir, problems). Never raises: a log
+    that can't be saved must not stop the heal."""
+    d = os.path.join(ARCHIVE, time.strftime("%Y-%m-%d_%H%M%S", time.localtime(now)))
+    problems = []
+    try:
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "docker-logs.txt"), "wb") as fh:
+            rc = subprocess.run(["docker", "logs", "--tail", str(LOG_LINES), cid], stdout=fh,
+                                stderr=subprocess.STDOUT, timeout=60, check=False).returncode
+        if rc != 0:
+            problems.append(f"docker logs exit {rc}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        problems.append(f"docker logs: {exc}")
+    try:
+        src = os.path.join(REPO, "mc_data", "logs", "latest.log")
+        with open(src, "rb") as fh_in, open(os.path.join(d, "latest.log"), "wb") as fh_out:
+            size = os.fstat(fh_in.fileno()).st_size
+            fh_in.seek(max(0, size - LATEST_LOG_MAX))
+            shutil.copyfileobj(fh_in, fh_out)
+    except OSError as exc:
+        problems.append(f"latest.log: {exc}")
+    try:
+        dirs = sorted(e for e in os.listdir(ARCHIVE) if os.path.isdir(os.path.join(ARCHIVE, e)))
+        for old in dirs[:-KEEP_LOG_DIRS]:
+            shutil.rmtree(os.path.join(ARCHIVE, old))
+    except OSError as exc:
+        problems.append(f"pruning {ARCHIVE}: {exc}")
+    return d, problems
+
+
+def heal(cid, streak, now, n_heals):
+    """Logs first, then stop -t 120, then up -d minecraft, then the alert text."""
+    d, problems = save_logs(cid, now)
+    log(f"saved logs to {d}" + (f" ({'; '.join(problems)})" if problems else ""))
+    rc_stop, out, err = run(["docker", "compose", "stop", "-t", "120", "minecraft"], 180, cwd=REPO)
+    log(f"docker compose stop -t 120 minecraft: exit {rc_stop} {(out + err).strip()[-300:]}")
+    rc_up, out, err = run(["docker", "compose", "up", "-d", "minecraft"], 300, cwd=REPO)
+    log(f"docker compose up -d minecraft: exit {rc_up} {(out + err).strip()[-300:]}")
+    ok = rc_stop == 0 and rc_up == 0
+    return (f"mc-heal: minecraft was hung (RCON silent for {streak['count']} checks over "
+            f"{round((now - streak['since']) / MIN)} min); {'restarted it' if ok else 'restart FAILED'} "
+            f"(stop exit {rc_stop}, up exit {rc_up}); heal {n_heals} of {CAP} allowed per {CAP_WINDOW // 3600} h. "
+            f"Logs: {d}" + (f" (not all saved: {'; '.join(problems)})" if problems else ""))
+
+
+def notify(alert):
+    """Send the alert and record in this unit's journal whether mc-alert delivered it."""
+    log(f"alert: {alert}")
+    rc, out, err = run([ALERT, alert], 60)
+    log(f"mc-alert exit {rc}: {(out + err).strip()[-300:]}")
+
+
+def check(now):
+    state = load_state()
+    container = find_container()
+    started_raw, started = (None, None) if container in (UNKNOWN, NOT_RUNNING) else container_started(container)
+    reason = skip_reason(now, read_flag(), uptime(), backup_busy(), container, started, state)
+    if reason is not None:
+        log(f"skip: {reason}")
+        return 0
+    alive, detail = probe(container)
+    action, new, alert = decide(now, alive, started_raw, state)
+    if alive:
+        if state.get("streak"):
+            log(f"RCON answers again after {state['streak']['count']} failed check(s): {detail}")
+    else:
+        s = new.get("streak") or new.get("healed_streak")
+        log(f"no answer ({s['count']} in a row over {round((now - s['since']) / MIN)} min): {detail}; "
+            f"action: {action or 'none'}")
+    if action == HEAL:
+        save_state(new)  # the heal must find itself already counted, even if it dies mid-way
+        alert = heal(container, new["healed_streak"], now, len(new["heals"]))
+    save_state(new)
+    if alert:
+        notify(alert)
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Restart a hung Minecraft server.")
+    ap.add_argument("--status", action="store_true", help="print the heal state only")
+    args = ap.parse_args(argv)
+    if args.status:
+        for level, text in status_lines(time.time(), load_state(), read_flag()):
+            print(f"{level}\t{text}")
+        return 0
+    if os.geteuid() == 0:
+        log("refusing to run as root: mc-heal.service runs it as mm-mike (compose and the state are mm-mike's)")
+        return 2
+    return check(time.time())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

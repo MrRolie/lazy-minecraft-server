@@ -1,0 +1,17 @@
+[Unit]
+Description=Minecraft hang watchdog (RCON dead >= 3 checks over >= 6 min: save logs, stop -t 120, up -d minecraft)
+Documentation=file:///home/mm-mike/minecraft-ai-host/AGENTS.md
+After=docker.service mc-server.service
+# A crashing watchdog must not be silent.
+OnFailure=mc-alert@%n.service
+
+[Service]
+Type=oneshot
+User=mm-mike
+WorkingDirectory=/home/mm-mike/minecraft-ai-host
+ExecStart=/usr/local/sbin/mc-heal
+# /var/lib/mc-heal, owned by mm-mike (the streak and heal history). Its own directory: a shared mc-host
+# StateDirectory would be chowned back and forth between this unit and the root ones.
+StateDirectory=mc-heal
+# The worst case: probe 30 s + logs 60 s + stop 180 s + up 300 s + alert 60 s.
+TimeoutStartSec=12min

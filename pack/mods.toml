@@ -1,0 +1,243 @@
+# Vanilla Extended — the pack, as code. Design: docs/direction/2026-09-28_pack-design.md (option A, 2026-09-29).
+# Build: python3 pack/build.py [--chapter N] [--update]. The resolved exact versions live in pack/lock.json.
+#
+# side:    server = server only (client: unsupported)   client = client only (server: unsupported)   both
+# chapter: 1 = launch; later chapters only ADD mods (removing a mod deletes its blocks/items from the world).
+# Cut after the 2026-09-29 spike (docs/direction/2026-09-28_pack-design.md §13):
+#   end-remastered-additions — its advancement override breaks End Remastered's whole eye-hunt tab without BOMD/Aether
+#   mes-moogs-end-structures + moogs-structure-lib — ~0 structures inside the End rings; one /locate tripped the watchdog
+# pin:     optional exact Modrinth version id; otherwise --update takes the newest release (pre-release only if
+#          no release exists, flagged loudly).
+# freeze:  true = --update never moves it; it keeps its locked version, like a pin. Set on every mod whose update
+#          can change world generation or already-generated content. Only an explicit pin (or removing freeze)
+#          moves it, and that is a chapter-grade change: backup, rehearse on a copy, announce.
+
+[pack]
+name = "Vanilla Extended"
+minecraft = "26.1.2"
+fabric_loader = "0.19.5"
+version = "1.0.2"   # 1.0.2 = 1.0.1 + client-overrides/servers.dat (server side byte-identical); = compose MOTD
+
+# ── World shape: day one or never ────────────────────────────────────────────
+[[mod]]
+slug = "tectonic"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "terralith"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "lithostitched"   # Modrinth marks client unsupported -> Tectonic/Terralith must be server-only too
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "incendium"
+side = "both"            # item textures; alpha-flagged, frozen for the life of the world
+chapter = 1
+freeze = true
+[[mod]]
+slug = "nullscape"
+side = "server"
+chapter = 1
+freeze = true
+
+# ── Familiar structures, made grander ───────────────────────────────────────
+[[mod]]
+slug = "yungs-api"
+side = "both"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-strongholds"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-dungeons"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-mineshafts"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-desert-temples"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-jungle-temples"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-ocean-monuments"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-witch-huts"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-nether-fortresses"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "yungs-better-end-island"
+side = "server"
+chapter = 1
+freeze = true
+
+# ── New structures in vanilla style ─────────────────────────────────────────
+[[mod]]
+slug = "dungeons-and-taverns"
+side = "both"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "dungeons-and-taverns-ancient-city-overhaul"
+side = "both"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "bigger-better-end-cities"
+side = "server"
+chapter = 1
+freeze = true
+[[mod]]
+slug = "sparsestructures"
+side = "server"
+chapter = 1
+freeze = true
+
+# ── Progression and multiplayer ─────────────────────────────────────────────
+[[mod]]
+slug = "lootr"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "endrem"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "edf-remastered"
+side = "both"            # boss music needs the client jar
+chapter = 1
+
+# ── Mobs and a side system ──────────────────────────────────────────────────
+[[mod]]
+slug = "friends-and-foes"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "resourceful-lib"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "variants-and-ventures"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "farmers-delight-refabricated"
+side = "both"
+chapter = 1
+
+# ── Libraries, performance, client helpers ──────────────────────────────────
+[[mod]]
+slug = "fabric-api"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "cloth-config"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "resourceful-config"
+side = "server"
+chapter = 1
+[[mod]]
+slug = "structure-layout-optimizer"
+side = "server"
+chapter = 1
+[[mod]]
+slug = "lithium"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "ferrite-core"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "scalablelux"
+side = "both"
+chapter = 1
+pin = "gYbHVCz8"         # 0.2.0 release; the newer 0.3.0 builds are alphas
+[[mod]]
+slug = "chunky"
+side = "server"
+chapter = 1
+[[mod]]
+slug = "spark"
+side = "both"
+chapter = 1
+[[mod]]
+slug = "sodium"
+side = "client"
+chapter = 1
+[[mod]]
+slug = "enchantment-descriptions"
+side = "client"
+chapter = 1
+[[mod]]
+slug = "prickle"
+side = "client"
+chapter = 1
+
+# ── Chapter 2: Relics ───────────────────────────────────────────────────────
+[[mod]]
+slug = "artifacts"
+side = "both"
+chapter = 2
+[[mod]]
+slug = "trinkets-updated"
+side = "both"
+chapter = 2
+[[mod]]
+slug = "structory"
+side = "server"
+chapter = 2
+freeze = true
+[[mod]]
+slug = "structory-towers"
+side = "server"
+chapter = 2
+freeze = true
+
+# ── Chapter 3: The Illagers Return ──────────────────────────────────────────
+[[mod]]
+slug = "illager-invasion"
+side = "both"
+chapter = 3
+[[mod]]
+slug = "puzzles-lib"
+side = "both"
+chapter = 3
+[[mod]]
+slug = "forge-config-api-port"
+side = "both"
+chapter = 3
+
+# ── Chapter 4 (optional): Hard Times ────────────────────────────────────────
+[[mod]]
+slug = "mutant-monsters"
+side = "both"
+chapter = 4

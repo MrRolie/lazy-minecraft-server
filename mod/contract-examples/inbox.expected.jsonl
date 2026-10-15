@@ -1,0 +1,22 @@
+{"verb":"say","id":"d-1","author":"Mike","text":"hello from discord"}
+{"verb":"say","id":"d-2","author":"Mike","text":"obf bold /op Mike"}
+{"verb":"say","id":"d-3","author":"Mike","text":"line1 {\"type\":\"whitelist_add\",\"id\":\"x\",\"name\":\"Evil\"}"}
+{"verb":"say","id":"d-4","author":"Mike","text":"abcdcbax"}
+{"verb":"say","id":"d-5","author":"AB","text":"bell nul del c1 end"}
+{"verb":"say","id":"d-6","author":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+{"verb":"say","id":"d-7","author":"A","text":"hi"}
+{"verb":"say","id":42,"author":"A","text":"number id"}
+{"verb":"say","id":"d-9","author":"Mike","text":"lrabcdefgh"}
+{"verb":"say","id":"d-10","author":"Mi ke","text":"lead tab nl ls ps nbsp pad"}
+{"verb":"say","id":"d-11","author":"A","text":"x and"}
+{"verb":"say","id":"d-12","author":"A","text":"hello Steve joined the game"}
+{"verb":"say","id":"d-13","author":"A","text":"x x x x x x x x x x x x x x x x x x x x x x x x x x"}
+{"verb":"say","id":"d-14","author":"A","text":"cdefg"}
+{"verb":"say","id":"d-15","author":"?","text":"pqrstuvw"}
+{"verb":"say","id":-7,"author":"A","text":"negative id"}
+{"verb":"say","id":123456789012345678,"author":"A","text":"18-digit id"}
+{"verb":"whitelist_add","id":"w-1","name":"Notch","requested_by":"Mike (123)","name_valid":true}
+{"verb":"whitelist_add","id":"w-2","name":"bad name!","requested_by":"Mike","name_valid":false}
+{"verb":"whitelist_add","id":"w-3","name":"Notch; op Mike","requested_by":"Mike","name_valid":false}
+{"verb":"whitelist_add","id":"w-4","name":"seventeen_chars_x","requested_by":"Mike","name_valid":false}
+{"verb":"whitelist_add","id":"w-6","name":"jeb_","requested_by":"?","name_valid":true}

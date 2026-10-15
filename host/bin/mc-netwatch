@@ -1,0 +1,330 @@
+#!/usr/bin/python3
+"""mc-netwatch: asus-node network watchdog (mc-netwatch.timer, every 2 min from boot +5 min).
+
+    mc-netwatch           one check + at most one action (root)
+    mc-netwatch --probe   print the health verdict only; exit 0 healthy, 1 not (no state, no action)
+
+Two observations, kept apart because they point at different faults:
+    gw_ok  the default gateway answers ping      (the local link and stack work)
+    ts_ok  Tailscale reports Self.Online         (connected to the Tailscale CONTROL plane)
+
+  healthy     ts_ok (whatever the gateway says: the node is reachable; a silent gateway is only logged)
+  LINK fault  not gw_ok and not ts_ok: the local link or stack is broken. Ladder on continuous link-down:
+                >= 4 min   nmcli connection up <wired>
+                >= 8 min   systemctl restart tailscaled
+                >= 15 min  reboot via `mc-maint --reboot` (player check + graceful stop), at most ONE per
+                           failure episode and at most one per 6 h: a second reboot needs the gateway to
+                           have answered since the last one.
+  UPSTREAM    gw_ok and not ts_ok: the WAN or Tailscale's control plane is down. Existing tunnels may still
+              carry players, and nothing local can fix it: never reboot, never bounce the wired link. After
+              >= 30 min continuous, restart tailscaled at most once per episode, and only if `mc-maint
+              --idle` confirms nobody is playing (unknown = no).
+
+An episode runs from the first unhealthy check to the next healthy one; a gap of more than 30 min
+between checks (machine was off) starts a new one; our own reboot (~7 min gap) does not. On recovery
+after any action, or after >= 30 min: one alert. State: /var/lib/mc-host/netwatch.json; a state file of
+the wrong shape is logged and replaced by an empty one.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+STATE_FILE = os.environ.get("MC_NETWATCH_STATE", "/var/lib/mc-host/netwatch.json")
+WIRED = os.environ.get("MC_WIRED_CONN", "Wired connection 1")
+MAINT = "/usr/local/sbin/mc-maint"
+ALERT = "/usr/local/sbin/mc-alert"
+EXIT_DEFERRED = 3  # mc-maint's "not safe to reboot"
+
+MIN = 60
+WIRED_UP_AFTER = 4 * MIN
+TAILSCALED_AFTER = 8 * MIN
+REBOOT_AFTER = 15 * MIN
+REBOOT_COOLDOWN = 6 * 3600
+STALE_AFTER = 30 * MIN
+UPSTREAM_RESTART_AFTER = 30 * MIN
+ALERT_AFTER = 30 * MIN
+
+WIRED_UP = "wired-up"
+RESTART_TAILSCALED = "restart-tailscaled"
+REBOOT = "reboot"
+REBOOT_DEFERRED = "reboot-deferred"
+RESTART_TAILSCALED_IDLE = "restart-tailscaled-idle"  # the upstream rung
+TAILSCALED_SKIPPED = "tailscaled-restart-skipped"
+
+LINK = "link"
+UPSTREAM = "upstream"
+
+NUM_FIELDS = ("last_check", "last_reboot", "last_gw_ok", "first_failure", "link_since", "upstream_since")
+
+
+def log(msg):
+    print(f"mc-netwatch: {msg}", flush=True)
+
+
+# ---- pure parsing ---------------------------------------------------------------------------
+
+def tailscale_online(status_json):
+    """True only if `tailscale status --json` parses and Self.Online is literally true."""
+    try:
+        return json.loads(status_json).get("Self", {}).get("Online") is True
+    except (ValueError, AttributeError):
+        return False
+
+
+def default_gateway(route_json):
+    """Gateway of the lowest-metric default route in `ip -j route show default`, else None."""
+    try:
+        routes = json.loads(route_json or "[]")
+    except ValueError:
+        return None
+    gws = [r for r in routes if isinstance(r, dict) and r.get("gateway")]
+    if not gws:
+        return None
+    return min(gws, key=lambda r: r.get("metric", 0))["gateway"]
+
+
+# ---- pure decision --------------------------------------------------------------------------
+
+def fault(gw_ok, ts_ok):
+    """None (healthy) | LINK | UPSTREAM."""
+    if ts_ok:
+        return None
+    return UPSTREAM if gw_ok else LINK
+
+
+def reboot_allowed(now, last_reboot, last_gw_ok):
+    """One reboot, then none until the gateway has answered again, and never within 6 h of the last."""
+    if last_reboot is None:
+        return True
+    return now - last_reboot >= REBOOT_COOLDOWN and last_gw_ok is not None and last_gw_ok > last_reboot
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def valid_state(state):
+    """True if every known field has the type decide() relies on."""
+    if not isinstance(state, dict):
+        return False
+    if any(state.get(k) is not None and not _num(state[k]) for k in NUM_FIELDS):
+        return False
+    acts = state.get("actions", [])
+    if not isinstance(acts, list) or not all(
+            isinstance(a, dict) and isinstance(a.get("action"), str) and _num(a.get("at"))
+            and isinstance(a.get("why", ""), str) for a in acts):
+        return False
+    for k in ("link_done", "kinds"):
+        v = state.get(k, [])
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            return False
+    return True
+
+
+def decide(now, gw_ok, ts_ok, state):
+    """(action or None, new_state, alert or None) for one check. Pure; `state` is not mutated."""
+    state = state or {}
+    last_reboot = state.get("last_reboot")
+    last_gw_ok = now if gw_ok else state.get("last_gw_ok")
+    base = {"last_check": now}
+    if last_reboot is not None:
+        base["last_reboot"] = last_reboot  # survives recovery: the gates outlive the episode
+    if last_gw_ok is not None:
+        base["last_gw_ok"] = last_gw_ok
+
+    first = state.get("first_failure")
+    actions = list(state.get("actions") or [])
+    kinds = list(state.get("kinds") or [])
+    kind = fault(gw_ok, ts_ok)
+
+    if kind is None:
+        alert = None
+        if first is not None and (actions or now - first >= ALERT_AFTER):
+            steps = ", ".join(f"{a['action']} (+{round((a['at'] - first) / MIN)}m)" for a in actions) or "none"
+            what = " + ".join({LINK: "link down", UPSTREAM: "Tailscale offline, gateway up"}[k] for k in kinds)
+            alert = f"network recovered after {round((now - first) / MIN)} min ({what}); actions: {steps}"
+        return None, base, alert
+
+    last_check = state.get("last_check")
+    if first is None or last_check is None or now - last_check > STALE_AFTER:
+        first, actions, kinds = now, [], []  # new episode
+        link_since = upstream_since = None
+        link_done = []
+    else:
+        link_since, upstream_since = state.get("link_since"), state.get("upstream_since")
+        link_done = list(state.get("link_done") or [])
+    if kind not in kinds:
+        kinds.append(kind)
+
+    action = None
+    if kind == LINK:
+        upstream_since = None
+        if link_since is None:
+            link_since, link_done = now, []  # a new stretch of link-down: the rungs start over
+        elapsed = now - link_since
+        if elapsed >= WIRED_UP_AFTER and WIRED_UP not in link_done:
+            action = WIRED_UP
+        elif elapsed >= TAILSCALED_AFTER and RESTART_TAILSCALED not in link_done:
+            action = RESTART_TAILSCALED
+        elif elapsed >= REBOOT_AFTER and reboot_allowed(now, last_reboot, last_gw_ok):
+            action = REBOOT
+    else:  # UPSTREAM: never reboot, never touch the wired link
+        link_since, link_done = None, []
+        if upstream_since is None:
+            upstream_since = now
+        if (now - upstream_since >= UPSTREAM_RESTART_AFTER
+                and not any(a["action"] == RESTART_TAILSCALED_IDLE for a in actions)):
+            action = RESTART_TAILSCALED_IDLE
+
+    new = {**base, "first_failure": first, "actions": actions, "kinds": kinds, "link_done": link_done}
+    if link_since is not None:
+        new["link_since"] = link_since
+    if upstream_since is not None:
+        new["upstream_since"] = upstream_since
+    if action is not None:
+        new["actions"] = actions + [{"action": action, "at": now}]
+        if action in (WIRED_UP, RESTART_TAILSCALED, REBOOT):
+            new["link_done"] = link_done + [action]
+        if action == REBOOT:
+            new["last_reboot"] = now  # recorded BEFORE rebooting; see undo_action()
+    return action, new, None
+
+
+def undo_action(state, action, now, note, why, prev_last_reboot=None):
+    """Take back an `action` decide() recorded but that did not happen (mc-maint said no), and note it
+    once per run of such refusals. The action stays due, so the next check retries it."""
+    new = dict(state)
+    actions = list(new.get("actions", []))
+    if actions and actions[-1]["action"] == action and actions[-1]["at"] == now:
+        actions.pop()
+    new["link_done"] = [a for a in new.get("link_done", []) if a != action]
+    if action == REBOOT:
+        if prev_last_reboot is None:
+            new.pop("last_reboot", None)
+        else:
+            new["last_reboot"] = prev_last_reboot
+    if not actions or actions[-1]["action"] != note:
+        actions.append({"action": note, "at": now, "why": why})
+    new["actions"] = actions
+    return new
+
+
+def reboot_deferred(state, prev_last_reboot, now, why):
+    """Undo a REBOOT that mc-maint refused: restore the old gate, note the deferral once."""
+    return undo_action(state, REBOOT, now, REBOOT_DEFERRED, why, prev_last_reboot)
+
+
+# ---- effects --------------------------------------------------------------------------------
+
+def run(cmd, timeout):
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, "", str(exc)
+    return res.returncode, res.stdout, res.stderr
+
+
+def probe():
+    """(gw_ok, ts_ok, detail) from live observations."""
+    _, ts_out, _ = run(["tailscale", "status", "--json"], 20)  # exits 1 when down; stdout still parsed
+    ts_ok = tailscale_online(ts_out)
+    _, route_out, _ = run(["ip", "-j", "route", "show", "default"], 10)
+    gw = default_gateway(route_out)
+    gw_ok = gw is not None and run(["ping", "-c", "3", "-W", "2", "-q", gw], 20)[0] == 0
+    detail = (f"tailscale {'online' if ts_ok else 'OFFLINE'}; "
+              f"gateway {gw or 'NONE'} {'answers' if gw_ok else 'NO REPLY'}")
+    return gw_ok, ts_ok, detail
+
+
+def load_state(path=STATE_FILE):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log(f"state unreadable ({exc}); starting fresh")
+        return {}
+    if not valid_state(state):
+        log(f"state has the wrong shape; starting fresh: {json.dumps(state)[:300]}")
+        return {}
+    return state
+
+
+def save_state(state, path=STATE_FILE):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)  # atomic: a reboot mid-write never leaves half a file
+
+
+def act(action, state, prev_last_reboot, now):
+    """Carry out one action; returns the state to persist."""
+    if action == WIRED_UP:
+        rc, out, err = run(["nmcli", "connection", "up", "id", WIRED], 90)
+        log(f"nmcli connection up '{WIRED}': exit {rc} {(out + err).strip()[:200]}")
+    elif action == RESTART_TAILSCALED:
+        rc, _, err = run(["systemctl", "restart", "tailscaled"], 90)
+        log(f"restart tailscaled: exit {rc} {err.strip()[:200]}")
+    elif action == RESTART_TAILSCALED_IDLE:
+        rc, out, err = run([MAINT, "--idle"], 120)
+        log(f"mc-maint --idle: exit {rc} {(out + err).strip()[-300:]}")
+        if rc != 0:  # players on, or unknown: existing tunnels may be carrying them
+            return undo_action(state, action, now, TAILSCALED_SKIPPED, "nobody-playing not confirmed")
+        rc, _, err = run(["systemctl", "restart", "tailscaled"], 90)
+        log(f"restart tailscaled (upstream fault, nobody playing): exit {rc} {err.strip()[:200]}")
+    elif action == REBOOT:
+        mins = round((now - state["first_failure"]) / MIN)
+        save_state(state)  # the reboot must find the gate already recorded
+        rc, out, err = run([MAINT, "--reboot", f"network down {mins} min"], 480)
+        log(f"mc-maint --reboot: exit {rc} {(out + err).strip()[-300:]}")
+        if rc != 0:
+            why = "mc-maint deferred" if rc == EXIT_DEFERRED else f"mc-maint exit {rc}"
+            return reboot_deferred(state, prev_last_reboot, now, why)
+    return state
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="asus-node network watchdog.")
+    ap.add_argument("--probe", action="store_true", help="print the health verdict only")
+    args = ap.parse_args(argv)
+
+    gw_ok, ts_ok, detail = probe()
+    if args.probe:  # both, strictly: setup.sh arms the watchdog only on this
+        print(f"{'healthy' if gw_ok and ts_ok else 'UNHEALTHY'}: {detail}")
+        return 0 if gw_ok and ts_ok else 1
+
+    now = time.time()
+    state = load_state()
+    action, new, alert = decide(now, gw_ok, ts_ok, state)
+    kind = fault(gw_ok, ts_ok)
+    if kind is None:
+        if state.get("first_failure") is not None:
+            log(f"healthy again: {detail}")
+        elif not gw_ok:
+            log(f"gateway silent but Tailscale online (reachable; no action): {detail}")
+    else:
+        log(f"{kind.upper()} fault, episode {round((now - new['first_failure']) / MIN)} min: {detail}; "
+            f"action: {action or 'none'}")
+    if action is not None:
+        new = act(action, new, state.get("last_reboot"), now)
+    save_state(new)
+    if alert:
+        notify(alert)
+    return 0
+
+
+def notify(alert):
+    """Send the alert and record in this unit's journal whether mc-alert delivered it."""
+    log(f"alert: {alert}")
+    rc, out, err = run([ALERT, alert], 60)
+    log(f"mc-alert exit {rc}: {(out + err).strip()[-300:]}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,22 @@
+.env
+.env.*
+!.env.example
+!.env.bridge.example
+
+# Live server state on the host — never in git (world is backed up by deploy/backup.sh)
+mc_data/
+backups/
+
+__pycache__/
+# bridge/test_compose.py scratch (under the repo: snap Docker cannot read /tmp)
+test-compose-*/
+.pytest_cache/
+
+# pack build outputs
+dist/
+# built server-side jars that compose hands to itzg (MODS); rebuilt from mod/ (mod/README.md)
+extras/
+pack/.cache/
+.claude/worktrees/
+# the maintenance flag (deploy/world.sh maintenance; host/bin/mc-heal stands down while it exists)
+/maintenance

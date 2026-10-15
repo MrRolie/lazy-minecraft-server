@@ -1,0 +1,8 @@
+[Unit]
+Description=Discord alert: %i failed
+
+[Service]
+Type=oneshot
+# %i is the failed unit (OnFailure=mc-alert@%n.service); mc-alert posts it with its last journal lines.
+ExecStart=/usr/local/sbin/mc-alert --unit %i
+TimeoutStartSec=2min

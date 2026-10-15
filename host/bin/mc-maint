@@ -1,0 +1,329 @@
+#!/usr/bin/python3
+"""mc-maint: the one place asus-node decides whether a reboot is safe, and does it.
+
+    mc-maint                   daily (mc-maint.timer, 05:40): reboot if /var/run/reboot-required
+    mc-maint --reboot REASON   reboot now if safe (mc-netwatch's last rung); exit 3 if deferred
+    mc-maint --idle            exit 0 if nobody can be playing (server stopped, or RCON says 0),
+                               3 otherwise (mc-netwatch asks before restarting tailscaled)
+    mc-maint --dry-run         print the decision, act on nothing
+
+The daily run also watches the disk the world lives on, unattended (rv3): mc-alert when the mc_data
+filesystem has under 20 GiB free, or mc_data/mcve/in (the bridge-writable inbox) is over 50 MiB. That is the
+alarm on the accepted disk-fill residual of a compromised bridge (bridge/README.md "Containment").
+It also mc-alerts when the Discord bridge container is running but not healthy (a FATAL hold: bad token,
+missing channel, no fence; or a hung pump), which otherwise only a hand-run check.sh would see.
+
+Safe = the minecraft container is verifiably stopped, or RCON reports 0 players, and no apt upgrade
+or backup is in progress. Anything that cannot be verified defers: no reboot.
+  - "Stopped" needs three observations: docker answers, the container minecraft-ai-host-minecraft-1
+    is not running, and no mc-server-runner process exists on the host. A runner with no running
+    container is an ORPHAN (a JVM docker lost track of): defer and alert.
+  - "In progress" means the unit's ActiveState is active/activating/reloading/deactivating. A oneshot
+    that is running reads `activating`, which `systemctl is-active` does not count as active.
+Rebooting leaves the graceful Minecraft stop to mc-server.service's ExecStop. If that unit is not
+active (before production stand-up), mc-maint stops the container itself first, because with
+live-restore dockerd no longer stops containers on shutdown.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.environ.get("MC_REPO", "/home/mm-mike/minecraft-ai-host")
+MC_USER = "mm-mike"
+CONTAINER = "minecraft-ai-host-minecraft-1"  # compose `name: minecraft-ai-host`, service `minecraft`
+RUNNER_PATTERN = "mc-server-runner"          # the itzg image's PID 1, which owns the JVM
+REBOOT_REQUIRED = "/var/run/reboot-required"
+ALERT = "/usr/local/sbin/mc-alert"
+EXIT_DEFERRED = 3
+BUSY_UNITS = ("apt-daily-upgrade.service", "mc-backup.service")
+BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
+MIN_FREE = 20 * 1024 ** 3    # bytes free on the mc_data filesystem
+MAX_INBOX = 50 * 1024 ** 2   # bytes in mc_data/mcve/in
+
+REBOOT = "reboot"
+STOP_THEN_REBOOT = "stop-then-reboot"
+DEFER = "defer"
+
+RUNNING, STOPPED, UNKNOWN, ORPHAN = "running", "stopped", "unknown", "orphan"
+
+
+def log(msg):
+    print(f"mc-maint: {msg}", flush=True)
+
+
+# ---- pure -----------------------------------------------------------------------------------
+
+def parse_player_count(rcon_list_output):
+    """Players online from `rcon-cli list` ("There are N of a max of M players online: ..."), else None."""
+    m = re.search(r"There are (\d+) of a max", rcon_list_output or "")
+    return int(m.group(1)) if m else None
+
+
+def classify_container(docker_ok, container_running, runner_found):
+    """RUNNING | STOPPED | UNKNOWN | ORPHAN from three observations (None = the observation failed).
+
+    docker_ok: the docker daemon answered; container_running: `docker inspect` of CONTAINER says
+    running (False also when it does not exist); runner_found: pgrep found an mc-server-runner.
+    """
+    if not docker_ok or container_running is None:
+        return UNKNOWN
+    if container_running:
+        return RUNNING
+    if runner_found is None:
+        return UNKNOWN
+    return ORPHAN if runner_found else STOPPED
+
+
+def decide(container, players, server_unit_active, busy_units):
+    """(action, reason) for a reboot request. Pure: every input is an observation made by the caller.
+
+    container: RUNNING | STOPPED | UNKNOWN | ORPHAN; players: int or None (unreadable);
+    server_unit_active: mc-server.service is active; busy_units: units still running (apt, backup).
+    """
+    if busy_units:
+        return DEFER, f"busy: {', '.join(busy_units)} still running"
+    if container == UNKNOWN:
+        return DEFER, "cannot tell whether minecraft is running (docker/pgrep error); not rebooting"
+    if container == ORPHAN:
+        return DEFER, (f"a {RUNNER_PATTERN} process is running but docker shows no running {CONTAINER} "
+                       "(orphaned server); not rebooting, check by hand")
+    if container == STOPPED:
+        return REBOOT, "minecraft verifiably not running"
+    if players is None:
+        return DEFER, "minecraft is running but RCON gave no player count; not rebooting"
+    if players > 0:
+        return DEFER, f"deferred: {players} online"
+    if server_unit_active:
+        return REBOOT, "0 players online; mc-server.service stops Minecraft gracefully on the way down"
+    return STOP_THEN_REBOOT, ("0 players online; mc-server.service is not active, so Minecraft is stopped "
+                              "gracefully first (it will not auto-start after boot until mc-server is enabled)")
+
+
+def is_idle(container, players):
+    """(idle, reason): nobody can be playing. Unknown or orphaned counts as NOT idle."""
+    if container == STOPPED:
+        return True, "minecraft verifiably not running"
+    if container == RUNNING and players == 0:
+        return True, "0 players online"
+    if container == RUNNING and players is not None:
+        return False, f"{players} online"
+    return False, f"cannot confirm nobody is playing (container {container}, players {players})"
+
+
+def disk_problems(free, inbox):
+    """The disk-watch alerts for (bytes free on mc_data's filesystem, bytes in mcve/in); None = unreadable."""
+    out = []
+    if free is None:
+        out.append("disk watch: cannot read free space on mc_data")
+    elif free < MIN_FREE:
+        out.append(f"disk watch: mc_data filesystem has {free / 1024 ** 3:.1f} GiB free (< {MIN_FREE // 1024 ** 3})")
+    if inbox is not None and inbox > MAX_INBOX:
+        out.append(f"disk watch: mcve/in is {inbox / 1024 ** 2:.0f} MiB (> {MAX_INBOX // 1024 ** 2}): inbox flood? "
+                   "bridge/README.md Containment")
+    return out
+
+
+def bridge_problem(status, health):
+    """The alert for the bridge container's (State.Status, State.Health.Status), or None. No container, or a
+    stopped one, is not this alarm's business: mc-bridge-up alerts when a start fails. "unknown" means docker
+    did not answer: that is an alert too, never a silent pass."""
+    if status == "unknown":
+        return f"bridge watch: docker did not answer ({health}); the bridge's health is unknown"
+    if status in ("running", "restarting") and health != "healthy":
+        return (f"Discord bridge is {status} but {health or 'without a healthcheck'} "
+                "(a FATAL hold? docker compose logs bridge)")
+    return None
+
+
+# ---- observations ---------------------------------------------------------------------------
+
+def bridge_state():
+    """(status, health) of the compose bridge container, found by its labels (no compose parsing); None if
+    there is none; ("unknown", why) if docker can't say."""
+    rc, out, err = run(["docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=minecraft-ai-host",
+                        "--filter", "label=com.docker.compose.service=bridge"], 30)
+    if rc != 0:
+        why = f"docker ps exit {rc}: {err.strip()[:120]}"
+        log(f"bridge watch: {why}")
+        return "unknown", why
+    cid = out.split()[0] if out.split() else None
+    if cid is None:
+        return None
+    rc, out, err = run(["docker", "inspect", "--format",
+                        "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", cid], 30)
+    if rc != 0:
+        why = f"docker inspect exit {rc}: {err.strip()[:120]}"
+        log(f"bridge watch: {why}")
+        return "unknown", why
+    parts = out.split()
+    return (parts[0], parts[1] if len(parts) > 1 else "") if parts else None
+
+def disk_usage(repo=None):
+    """(bytes free on the mc_data filesystem, apparent bytes under mcve/in) -- None for what can't be read.
+    Never follows a link: a linked mcve/in is the mailbox check's FAIL (check.sh), not a size to sum."""
+    data = os.path.join(repo or REPO, "mc_data")
+    try:
+        st = os.statvfs(data)
+        free = st.f_bavail * st.f_frsize
+    except OSError:
+        free = None
+    inbox, total = os.path.join(data, "mcve", "in"), 0
+    if not os.path.isdir(inbox) or os.path.islink(inbox):
+        return free, None
+    for root, dirs, files in os.walk(inbox):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return free, total
+
+def run(cmd, timeout, cwd=None):
+    try:
+        res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, "", str(exc)
+    return res.returncode, res.stdout, res.stderr
+
+
+def compose(*args, timeout):
+    cmd = ["docker", "compose", *args]
+    if os.geteuid() == 0:  # never leave root-owned artefacts in the repo dir
+        cmd = ["runuser", "-u", MC_USER, "--", *cmd]
+    return run(cmd, timeout, cwd=REPO)
+
+
+def container_state():
+    # docker.service being down does NOT mean the container is down: with live-restore it keeps
+    # running. So docker must answer, and the host process table must agree.
+    rc, _, err = run(["docker", "version", "-f", "{{.Server.Version}}"], 30)
+    docker_ok = rc == 0
+    if not docker_ok:
+        log(f"docker does not answer: {err.strip()[:200]}")
+    running = None
+    if docker_ok:
+        rc, out, err = run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER], 30)
+        if rc == 0 and out.strip() in ("true", "false"):
+            running = out.strip() == "true"
+        elif rc is not None and rc != 0 and "no such" in err.lower():
+            running = False  # no such container
+        else:
+            log(f"docker inspect {CONTAINER}: exit {rc} {(out + err).strip()[:200]}")
+    rc, out, err = run(["pgrep", "-f", RUNNER_PATTERN], 10)
+    runner = True if rc == 0 else False if rc == 1 else None
+    if runner is None:
+        log(f"pgrep failed: exit {rc} {err.strip()[:200]}")
+    state = classify_container(docker_ok, running, runner)
+    if state == ORPHAN:
+        log(f"orphan: pgrep -f {RUNNER_PATTERN} -> {out.split()}")
+    return state
+
+
+def player_count():
+    rc, out, err = run(["docker", "exec", CONTAINER, "rcon-cli", "list"], 30)
+    count = parse_player_count(out)
+    if count is None:
+        log(f"rcon list exit {rc}, unparsed: {(out + err).strip()[:200]!r}")
+    return count
+
+
+def unit_active(unit):
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode == 0
+
+
+def unit_busy(unit):
+    """True while the unit runs (a running oneshot is `activating`). A systemctl error counts as busy."""
+    rc, out, err = run(["systemctl", "show", "-p", "ActiveState", "--value", unit], 15)
+    if rc != 0:
+        log(f"systemctl show {unit}: exit {rc} {err.strip()[:200]}; treating as busy")
+        return True
+    return out.strip() in BUSY_STATES
+
+
+def alert(msg):
+    """Best-effort alert; its outcome (mc-alert's exit and stderr) lands in this unit's journal."""
+    log(f"alert: {msg}")
+    rc, out, err = run([ALERT, msg], 60)
+    log(f"mc-alert exit {rc}: {(out + err).strip()[-300:]}")
+
+
+def observe():
+    """(container, action, why)."""
+    container = container_state()
+    players = player_count() if container == RUNNING else None
+    busy = [u for u in BUSY_UNITS if unit_busy(u)]
+    action, why = decide(container, players, unit_active("mc-server.service"), busy)
+    return container, players, action, why
+
+
+def reboot(action, why):
+    """Carry out REBOOT / STOP_THEN_REBOOT. False (alerted) if the graceful stop failed."""
+    if action == STOP_THEN_REBOOT:
+        log("stopping minecraft gracefully (docker compose stop -t 120)")
+        rc, out, err = compose("stop", "-t", "120", timeout=180)
+        if rc != 0:
+            alert(f"reboot aborted: graceful stop failed (exit {rc}: {(out + err).strip()[-200:]}); {why}")
+            return False
+    alert(f"rebooting: {why}")
+    subprocess.run(["systemctl", "reboot"], check=True)
+    return True
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Reboot asus-node only when it is safe.")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--reboot", metavar="REASON", help="reboot now if safe (exit 3 if deferred)")
+    mode.add_argument("--idle", action="store_true", help="exit 0 if nobody can be playing, else 3")
+    ap.add_argument("--dry-run", action="store_true", help="print the decision only")
+    args = ap.parse_args(argv)
+
+    if args.idle:
+        container = container_state()
+        players = player_count() if container == RUNNING else None
+        idle, why = is_idle(container, players)
+        log(f"idle={idle}: {why}")
+        return 0 if idle else EXIT_DEFERRED
+
+    if args.reboot is None:
+        problems = disk_problems(*disk_usage())
+        bridge = bridge_state()
+        if bridge and bridge_problem(*bridge):
+            problems.append(bridge_problem(*bridge))
+        for problem in problems:
+            if args.dry_run:
+                log(problem)
+            else:
+                alert(problem)
+        if not os.path.exists(REBOOT_REQUIRED):
+            log("no reboot required")
+            return 0
+        pkgs = ""
+        try:
+            with open(REBOOT_REQUIRED + ".pkgs", encoding="utf-8") as fh:
+                pkgs = " ".join(sorted(set(fh.read().split())))
+        except OSError:
+            pass
+        reason = "updates need a reboot" + (f" ({pkgs})" if pkgs else "")
+    else:
+        reason = args.reboot
+
+    container, _, action, why = observe()
+    log(f"{reason}: {action} ({why})")
+    if args.dry_run:
+        return 0
+    if action == DEFER:
+        if args.reboot is not None:
+            if container == ORPHAN:  # needs a human whatever the network is doing
+                alert(f"reboot deferred, {why}. {reason}")
+            return EXIT_DEFERRED  # otherwise mc-netwatch records the deferral; the network is down
+        alert(f"reboot pending, {why}; next try tomorrow 05:40. {reason}")
+        return 0
+    if not reboot(action, f"{reason}; {why}"):
+        return EXIT_DEFERRED if args.reboot is not None else 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

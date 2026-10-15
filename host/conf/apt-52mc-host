@@ -1,0 +1,19 @@
+// asus-node: unattended-upgrades also takes the Tailscale apt repo (05:00 window).
+// Matched fields come from its Release file: Origin: Tailscale, Label: Tailscale, Codename: noble
+// (no Suite) -> codename=; component main.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Tailscale,label=Tailscale,codename=${distro_codename},component=main";
+};
+// Docker is NEVER upgraded unattended: a docker-ce/containerd.io upgrade restarts dockerd under the running
+// server, and live-restore is only supported across patch releases. Docker's origin is not allowed above;
+// this blacklist is belt-and-braces (entries are Python regexes, prefix-matched, hence the `$`).
+// Docker upgrades are a manual stopped-server procedure (AGENTS.md "Host maintenance").
+Unattended-Upgrade::Package-Blacklist {
+        "docker-ce$";
+        "docker-ce-cli$";
+        "docker-ce-rootless-extras$";
+        "containerd.io$";
+        "docker-.*-plugin$";
+};
+// Reboots are orchestrated by mc-maint (05:40, only with nobody online), never by unattended-upgrades.
+Unattended-Upgrade::Automatic-Reboot "false";

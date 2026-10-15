@@ -1,0 +1,75 @@
+# The friend Discord guild, as code. Apply with `python3 discord/sync.py --apply`
+# (dry run without the flag). Text channel names: lowercase, dashes, no spaces.
+# read_only = only the bot/admins post; private = hidden from @everyone.
+# extra_bots = user ids of other bots (the bridge) that get the bot's own allow in a locked category.
+
+[guild]
+system_channel = "general"   # where Discord posts "X joined the server"
+
+[[category]]
+name = "START HERE"
+read_only = true
+
+  [[category.channel]]
+  name = "welcome"
+  topic = "What this server is, and the house rules."
+  content = "welcome.md"
+
+  [[category.channel]]
+  name = "setup"
+  topic = "How to join: Tailscale → modpack → connect. Stuck? Ask in #help."
+  content = "setup.md"
+
+  [[category.channel]]
+  name = "announcements"
+  topic = "Launch, new chapters, maintenance. Worth turning notifications on for this one."
+
+  [[category.channel]]
+  name = "the-story"
+  topic = "How this server came to be, told as a story. A new part lands whenever something worth telling happens."
+  content = "story.md"
+
+[[category]]
+name = "THE WORLD"
+
+  [[category.channel]]
+  name = "general"
+  topic = "Anything and everything."
+
+  [[category.channel]]
+  name = "game-chat"
+  topic = "Game chat ↔ Discord. Type here to talk to players in game."
+
+  [[category.channel]]
+  name = "discoveries"
+  topic = "What's out there? Found something cool or weird? Type /discovery <note> in game and it posts here with coords. A feed of finds: scroll it to pick your next trip. Screenshots welcome."
+
+  [[category.channel]]
+  name = "coords"
+  topic = "Where was that again? Type /coords <name> in game to save a place you'll come back to: bases, portals, the nether hub, farms. This is the lookup list, so keep it to places, not news."
+
+  [[category.channel]]
+  name = "help"
+  topic = "Can't connect, crashes, anything stuck. Whitelist: type /whitelist <your Minecraft name> anywhere here. If that doesn't work, post your username in this channel."
+
+[[category]]
+name = "VOICE"
+
+  [[category.channel]]
+  name = "🔥 Campfire"           # the default: everyone hangs out here
+  type = "voice"
+  renamed_from = ["Overworld"]
+
+  [[category.channel]]
+  name = "🗺️ Side Quest"         # for when a group splits off onto its own effort
+  type = "voice"
+  renamed_from = ["Nether"]
+
+[[category]]
+name = "ADMIN"
+private = true
+extra_bots = ["123456789012345678"]   # MC Relay, the bridge bot, so it can post to #ops-log (bridge/README.md)
+
+  [[category.channel]]
+  name = "ops-log"
+  topic = "Admin only: server ops notes, restarts, backups."
