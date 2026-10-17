@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Build the Vanilla Extended .mrpack from pack/mods.toml + pack/lock.json + pack/overrides/.
+"""Build the instance's .mrpack from <dir>/mods.toml + <dir>/lock.json + <dir>/overrides/.
 
   python3 pack/build.py                 # build chapter 1 from the lock (resolves + locks any new mod)
   python3 pack/build.py --chapter 2     # include chapters <= 2
   python3 pack/build.py --update        # re-resolve every unpinned, unfrozen mod to its newest release
+  python3 pack/build.py --which         # print the .mrpack compose runs (a name under dist/); builds nothing
+  python3 pack/build.py --mode          # print kit.toml's pack.mode (vanilla-extended | custom); builds nothing
+
+<dir> is pack/ (Vanilla Extended), or pack-custom/ (gitignored) when kit.toml says pack.mode = "custom"
+(docs/kit/CUSTOM-PACK.md); --dir names another. The output is dist/<[pack] name, slugged>-<version>-ch<N>.mrpack.
+A custom pack has one chapter (a change is a [pack] version bump) and its [pack] name is checked (kit/kitconfig.py).
 
 The lock is the reproducibility record: a world is only restorable with the exact pack it was generated with.
 File hashes, URLs and sizes come from the Modrinth API (never computed); each download is checked against them.
@@ -17,6 +23,8 @@ Fail-closed lint (any error -> no .mrpack), resolving each side the way Fabric L
   - every Modrinth "required" dependency is in the pack
   - no overrides/mods (itzg extracts overrides unfiltered — a client jar there would crash the server)
   - client-overrides/ holds only servers.dat (see servers_dat)
+  - what the kit's own machinery needs is in every pack (KIT_SERVER_MODS, KIT_OVERRIDES, the Minecraft and Fabric
+    loader of pack/mods.toml): see kit_problems
 The .mrpack is deterministic. An identical rebuild leaves the file untouched (itzg reinstalls on mtime change);
 different content under an unchanged [pack] version is refused.
 Stdlib only.
@@ -38,16 +46,23 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 API = "https://api.modrinth.com/v2"
-UA = "mm-mike/minecraft-ai-host pack/build.py (private friend server)"
+UA = "minecraft-ai-host pack/build.py (a private friend server kit)"
 SIDES = ("server", "client", "both")
-# The one home of the friends' server address. The pack's servers.dat is built from it, and pack/test_build.py
-# holds every other mention in the repo (discord/content/setup.md, AGENTS.md) to it.
-# Placeholder: the operator sets this to the server's own Tailscale MagicDNS name.
-SERVER_ADDRESS = "your-server.tail000000.ts.net"
 CLIENT_OVERRIDES = {"client-overrides/servers.dat"}  # the only client-only files the pack may ship
 ENV = {"server": {"client": "unsupported", "server": "required"},
        "client": {"client": "required", "server": "unsupported"},
        "both": {"client": "required", "server": "required"}}
+# What the kit's own machinery loads or runs on the server, so every pack must carry it (a custom one included).
+# ve-commands itself is not in any pack: compose's MODS hands it to itzg from extras/ (mod/README.md).
+KIT_SERVER_MODS = {
+    "fabric-api": "ve-commands (the Discord bridge, /whitelist from Discord) depends on it "
+                  "(mod/ve-commands/src/main/resources/fabric.mod.json)",
+    "chunky": "deploy/world.sh pre-generates the world with Chunky (KIT.md P9) and reads its progress",
+}
+# Overrides the kit relies on, byte for byte as pack/overrides/ has them.
+KIT_OVERRIDES = {
+    "config/chunky/config.json": "continueOnRestart: a pre-generation ring resumes after a restart (deploy/world.sh)",
+}
 
 
 # ── Fabric version predicates (mirrors fabric-loader 0.19.5 SemanticVersionImpl / VersionPredicateParser) ──
@@ -332,6 +347,32 @@ def lint(mods, locks, metas, builtins, overrides_dir=None):
     return errors
 
 
+def version_problems(pack, ve_dir=HERE):
+    """The kit runs pack/mods.toml's Minecraft and Fabric loader, whatever the pack. -> list of error strings."""
+    ve = tomllib.loads((ve_dir / "mods.toml").read_text())["pack"]
+    return [f"[pack] {key} = {pack[key]!r}, but the kit runs {ve[key]!r} (pack/mods.toml): ve-commands is built and "
+            f"pinned for exactly that pair, and the server image for its Java"
+            for key in ("minecraft", "fabric_loader") if pack[key] != ve[key]]
+
+
+def kit_problems(pack, mods, metas, overrides_dir, ve_dir=HERE):
+    """What the kit's machinery needs from any pack: KIT_SERVER_MODS, KIT_OVERRIDES, and version_problems. Vanilla
+    Extended is the reference, so it passes by construction. -> list of error strings."""
+    errors = version_problems(pack, ve_dir)
+    server_ids = set()
+    for m in mods:
+        if m["side"] != "client":
+            server_ids |= {metas[m["slug"]]["id"], *metas[m["slug"]]["provides"]}
+    for mid, why in KIT_SERVER_MODS.items():
+        if mid not in server_ids:
+            errors.append(f"{mid}: not in the pack on the server side; {why}")
+    for rel, why in KIT_OVERRIDES.items():
+        have, want = overrides_dir / rel, ve_dir / "overrides" / rel
+        if not have.is_file() or have.read_bytes() != want.read_bytes():
+            errors.append(f"overrides/{rel}: missing, or not the kit's copy in pack/overrides/ ({why})")
+    return errors
+
+
 def _nbt_str(s):
     if "\0" in s or any(ord(c) > 0xFFFF for c in s):
         raise ValueError(f"{s!r}: Java writes this differently in modified UTF-8")
@@ -362,7 +403,7 @@ def lint_entries(entries):
 def index(pack, mods, locks, version_id):
     return {
         "formatVersion": 1, "game": "minecraft", "versionId": version_id, "name": pack["name"],
-        "summary": "Vanilla Extended — private friend server",
+        "summary": f"{pack['name']} — private friend server",
         "files": [{"path": f"mods/{locks[m['slug']]['filename']}",
                    "hashes": {"sha1": locks[m["slug"]]["sha1"], "sha512": locks[m["slug"]]["sha512"]},
                    "env": ENV[m["side"]], "downloads": [locks[m["slug"]]["url"]],
@@ -408,14 +449,49 @@ def refresh_lock(lock, all_mods, mc, update, resolve=resolve):
     return lock
 
 
-def mrpack_entries(pack, mods, locks, version_id, overrides_dir):
+def _kitconfig():
+    if str(ROOT / "kit") not in sys.path:
+        sys.path.insert(0, str(ROOT / "kit"))  # kit/ only, never the repo root (it holds discord/)
+    import kitconfig
+    return kitconfig
+
+
+def kit_config(kit_toml=None):
+    kitconfig = _kitconfig()
+    try:
+        return kitconfig.load(kit_toml)
+    except kitconfig.ConfigError as e:
+        sys.exit(f"pack/build.py needs kit.toml for the server address and pack.mode: {e}")
+
+
+def server_address(kit_toml=None):
+    """The friends' server address, kit.toml tailscale.server_address: its one home (pack/test_build.py keeps every
+    other tailnet address out of the files a copy keeps). Baked into servers.dat, so every instance builds its own."""
+    return kit_config(kit_toml)["tailscale"]["server_address"]
+
+
+def custom_problems(src, mods, chapter):
+    """A custom pack (src is not pack/): one chapter, and a [pack] the kit can name things after. -> list of errors."""
+    kitconfig = _kitconfig()
+    errors = []
+    try:
+        kitconfig.pack_section(src)
+    except kitconfig.ConfigError as e:
+        errors.append(str(e))
+    if chapter != 1 or any(m.get("chapter", 1) != 1 for m in mods):
+        errors.append("a custom pack has one chapter: drop chapter keys and --chapter; a change to it is a [pack] "
+                      "version bump (backup, announce)")
+    return errors
+
+
+def mrpack_entries(pack, mods, locks, version_id, overrides_dir, address):
     """-> {zip member: bytes} — the whole content of the .mrpack. Exits if lint_entries refuses it."""
     entries = {"modrinth.index.json": json.dumps(index(pack, mods, locks, version_id), indent=1).encode()}
     for f in sorted(overrides_dir.rglob("*")):
         if f.is_file():
             entries["overrides/" + f.relative_to(overrides_dir).as_posix()] = f.read_bytes()
     # Launchers apply client-overrides/ on top of overrides/; itzg installs only overrides/ and server-overrides/.
-    entries["client-overrides/servers.dat"] = servers_dat(pack["name"], SERVER_ADDRESS)
+    entries["client-overrides/servers.dat"] = servers_dat(pack["name"], address)
     errors = lint_entries(entries)
     if errors:
         print("\n".join(f"  ERROR {e}" for e in errors))
@@ -452,10 +528,36 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--chapter", type=int, default=1)
     ap.add_argument("--update", action="store_true", help="re-resolve unpinned, unfrozen mods to their newest release")
+    ap.add_argument("--dir", help="the pack directory (default from kit.toml pack.mode: pack/, or pack-custom/)")
+    ap.add_argument("--which", action="store_true", help="print the .mrpack compose runs (a name under dist/), "
+                                                          "build nothing")
+    ap.add_argument("--mode", action="store_true", help="print kit.toml's pack.mode, build nothing "
+                                                         "(pack/spike.sh --if-custom)")
     args = ap.parse_args()
+    if args.mode:
+        print(kit_config()["pack"]["mode"])
+        return 0
+    kitconfig = _kitconfig()
+    if args.which:
+        try:
+            print(kitconfig.live_pack_file(ROOT))
+        except kitconfig.ConfigError as e:
+            sys.exit(f"pack/build.py --which: {e}")
+        return 0
+    cfg = kit_config()  # before any network work: no kit.toml, no pack
+    address = cfg["tailscale"]["server_address"]
+    src = Path(args.dir).resolve() if args.dir else kitconfig.pack_dir(cfg, ROOT)
+    custom = src != HERE
 
-    pack, all_mods = load_manifest((HERE / "mods.toml").read_text())
-    lock_path = HERE / "lock.json"
+    pack, all_mods = load_manifest((src / "mods.toml").read_text())
+    if custom:
+        errors = custom_problems(src, all_mods, args.chapter) + version_problems(pack)  # before any network work
+        if errors:
+            print("\n".join(f"  ERROR {e}" for e in errors))
+            sys.exit(f"{src.name}: not a pack the kit can build; no .mrpack written")
+        for m in all_mods:
+            m.setdefault("chapter", 1)
+    lock_path = src / "lock.json"
     lock = json.loads(lock_path.read_text()) if lock_path.exists() else {"mods": {}}
     if lock.get("minecraft", pack["minecraft"]) != pack["minecraft"]:
         sys.exit("lock.json is for a different Minecraft version — a world is locked to its version")
@@ -469,7 +571,8 @@ def main():
     metas = {m["slug"]: jar_meta(fetch(lock["mods"][m["slug"]], cache), m["slug"]) for m in mods}
     builtins = {"minecraft": pack["minecraft"], "fabricloader": pack["fabric_loader"],
                 "fabric-loader": pack["fabric_loader"], "java": "25"}
-    errors = lint(mods, lock["mods"], metas, builtins, HERE / "overrides")
+    errors = lint(mods, lock["mods"], metas, builtins, src / "overrides")
+    errors += kit_problems(pack, mods, metas, src / "overrides")
     for m in mods:
         lk = lock["mods"][m["slug"]]
         if lk["version_type"] != "release":
@@ -481,8 +584,8 @@ def main():
     version_id = f"{pack['version']}-ch{args.chapter}"
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
-    out = dist / f"vanilla-extended-{version_id}.mrpack"
-    status = write_mrpack(out, mrpack_entries(pack, mods, lock["mods"], version_id, HERE / "overrides"))
+    out = dist / kitconfig.mrpack_name(pack["name"], pack["version"], args.chapter)
+    status = write_mrpack(out, mrpack_entries(pack, mods, lock["mods"], version_id, src / "overrides", address))
     n_server = sum(m["side"] != "client" for m in mods)
     n_client = sum(m["side"] != "server" for m in mods)
     print(f"{status} {out.relative_to(ROOT)}: {len(mods)} jars ({n_server} server, {n_client} client)")

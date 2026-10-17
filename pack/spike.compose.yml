@@ -1,0 +1,11 @@
+# pack/spike.sh's overlay, passed last with -f after docker-compose.yml (and a custom pack's
+# docker-compose.override.yml): the same image and environment as the real server, but a throwaway world.
+# Never used on its own, and never by the real server (compose only auto-loads docker-compose.override.yml).
+services:
+  minecraft:
+    ports: !reset []          # nothing published: the spike is unreachable, even on the LAN
+    volumes: !override        # a fresh data dir per spike, never ./mc_data
+      - "${MC_SPIKE_DATA:?pack/spike.sh sets it}:/data"
+      - ./dist:/pack:ro
+      - ./extras:/extras:ro
+    restart: "no"

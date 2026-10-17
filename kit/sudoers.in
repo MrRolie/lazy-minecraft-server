@@ -1,0 +1,5 @@
+# minecraft-ai-host kit: the kit user may sudo without a password (HUMAN-STEPS step 7; design decision, 2026-10-14: kept
+# after launch, as on asus-node, so chapters and fixes need no human). Installed by kit/sudoers.sh.
+# Scoped to one user, not to commands: host/setup.sh runs as root and installs root-run scripts, so a command list
+# would not narrow what this user can do. Remove it with: sudo bash kit/sudoers.sh remove
+@MC_USER@ ALL=(ALL:ALL) NOPASSWD: ALL

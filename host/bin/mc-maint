@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""mc-maint: the one place asus-node decides whether a reboot is safe, and does it.
+"""mc-maint: the one place the game host decides whether a reboot is safe, and does it.
 
     mc-maint                   daily (mc-maint.timer, 05:40): reboot if /var/run/reboot-required
     mc-maint --reboot REASON   reboot now if safe (mc-netwatch's last rung); exit 3 if deferred
@@ -30,8 +30,8 @@ import re
 import subprocess
 import sys
 
-REPO = os.environ.get("MC_REPO", "/home/mm-mike/minecraft-ai-host")
-MC_USER = "mm-mike"
+REPO = None     # main(): kit_value("MC_REPO")
+MC_USER = None  # main(): kit_value("MC_USER"), who runs compose (runuser) when mc-maint stops the server itself
 CONTAINER = "minecraft-ai-host-minecraft-1"  # compose `name: minecraft-ai-host`, service `minecraft`
 RUNNER_PATTERN = "mc-server-runner"          # the itzg image's PID 1, which owns the JVM
 REBOOT_REQUIRED = "/var/run/reboot-required"
@@ -41,6 +41,29 @@ BUSY_UNITS = ("apt-daily-upgrade.service", "mc-backup.service")
 BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 MIN_FREE = 20 * 1024 ** 3    # bytes free on the mc_data filesystem
 MAX_INBOX = 50 * 1024 ** 2   # bytes in mc_data/mcve/in
+
+# >>> kit_value: one copy in each of mc-heal, mc-maint and mc-netwatch, byte-identical (host/test_host.py pins it)
+KIT_ENV_LINE = re.compile(r'([A-Z][A-Z0-9_]*)="([^"\\$`\n]*)"')  # = kit/render.py KIT_ENV_LINE
+
+
+def kit_value(key):
+    """An instance value: $KEY if set (tests, rehearsal on a spike), else KEY in the root-owned copy of host/kit.env
+    that setup.sh installs ($MC_KIT_ENV, default /etc/mc-host/kit.env). Never a default in code: exits if neither
+    has it, so the unit fails and mc-alert@ says so."""
+    if os.environ.get(key):
+        return os.environ[key]
+    path = os.environ.get("MC_KIT_ENV", "/etc/mc-host/kit.env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh.read().splitlines():
+                m = KIT_ENV_LINE.fullmatch(line)
+                if m and m.group(1) == key:
+                    return m.group(2)
+    except OSError as exc:
+        sys.exit(f"{os.path.basename(sys.argv[0])}: cannot read kit.env at {path} ({exc.strerror}): sudo bash host/setup.sh")
+    sys.exit(f"{os.path.basename(sys.argv[0])}: kit.env at {path} has no {key}: python3 kit/render.py, then setup.sh")
+# <<< kit_value
+
 
 REBOOT = "reboot"
 STOP_THEN_REBOOT = "stop-then-reboot"
@@ -272,12 +295,15 @@ def reboot(action, why):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Reboot asus-node only when it is safe.")
+    ap = argparse.ArgumentParser(description="Reboot the game host only when it is safe.")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--reboot", metavar="REASON", help="reboot now if safe (exit 3 if deferred)")
     mode.add_argument("--idle", action="store_true", help="exit 0 if nobody can be playing, else 3")
     ap.add_argument("--dry-run", action="store_true", help="print the decision only")
     args = ap.parse_args(argv)
+    global REPO, MC_USER
+    REPO = REPO or kit_value("MC_REPO")  # first: without them nothing below can be judged, so nothing runs
+    MC_USER = MC_USER or kit_value("MC_USER")
 
     if args.idle:
         container = container_state()

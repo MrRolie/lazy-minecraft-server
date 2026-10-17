@@ -1,6 +1,6 @@
 [Unit]
 Description=Minecraft friend server (docker compose): start at boot, stop gracefully BEFORE docker at shutdown
-Documentation=file:///home/mm-mike/minecraft-ai-host/AGENTS.md
+Documentation=file://@MC_REPO@/AGENTS.md
 # Wants=, not Requires=: Requires= would also restart this unit (stop + start Minecraft) whenever
 # docker.service restarts (e.g. a manual `systemctl restart docker`), which is what live-restore avoids.
 # After= alone orders the shutdown: this unit stops first, while docker is still up.
@@ -11,8 +11,8 @@ OnFailure=mc-alert@%n.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-User=mm-mike
-WorkingDirectory=/home/mm-mike/minecraft-ai-host
+User=@MC_USER@
+WorkingDirectory=@MC_REPO@
 # Minecraft alone first, then the Discord bridge, which may fail without stopping anything ("-"). A plain
 # `up -d` aborts EVERY service when the bridge image is missing and can't be built (e.g. no network at
 # boot); nothing about the bridge may stop Minecraft from starting. --no-build: never build at boot.

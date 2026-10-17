@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""mc-netwatch: asus-node network watchdog (mc-netwatch.timer, every 2 min from boot +5 min).
+"""mc-netwatch: the game host's network watchdog (mc-netwatch.timer, every 2 min from boot +5 min).
 
     mc-netwatch           one check + at most one action (root)
     mc-netwatch --probe   print the health verdict only; exit 0 healthy, 1 not (no state, no action)
@@ -10,7 +10,7 @@ Two observations, kept apart because they point at different faults:
 
   healthy     ts_ok (whatever the gateway says: the node is reachable; a silent gateway is only logged)
   LINK fault  not gw_ok and not ts_ok: the local link or stack is broken. Ladder on continuous link-down:
-                >= 4 min   nmcli connection up <wired>
+                >= 4 min   nmcli connection up <wired> (a Wi-Fi-only laptop: its Wi-Fi)
                 >= 8 min   systemctl restart tailscaled
                 >= 15 min  reboot via `mc-maint --reboot` (player check + graceful stop), at most ONE per
                            failure episode and at most one per 6 h: a second reboot needs the gateway to
@@ -28,15 +28,41 @@ the wrong shape is logged and replaced by an empty one.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 STATE_FILE = os.environ.get("MC_NETWATCH_STATE", "/var/lib/mc-host/netwatch.json")
-WIRED = os.environ.get("MC_WIRED_CONN", "Wired connection 1")
+# main(): the NetworkManager connection the first rung brings up: kit_value("MC_WIRED_CONN"), or on a Wi-Fi-only
+# laptop (no wired connection in kit.toml) its one link, kit_value("MC_WIFI_CONN").
+WIRED = None
 MAINT = "/usr/local/sbin/mc-maint"
 ALERT = "/usr/local/sbin/mc-alert"
 EXIT_DEFERRED = 3  # mc-maint's "not safe to reboot"
+
+# >>> kit_value: one copy in each of mc-heal, mc-maint and mc-netwatch, byte-identical (host/test_host.py pins it)
+KIT_ENV_LINE = re.compile(r'([A-Z][A-Z0-9_]*)="([^"\\$`\n]*)"')  # = kit/render.py KIT_ENV_LINE
+
+
+def kit_value(key):
+    """An instance value: $KEY if set (tests, rehearsal on a spike), else KEY in the root-owned copy of host/kit.env
+    that setup.sh installs ($MC_KIT_ENV, default /etc/mc-host/kit.env). Never a default in code: exits if neither
+    has it, so the unit fails and mc-alert@ says so."""
+    if os.environ.get(key):
+        return os.environ[key]
+    path = os.environ.get("MC_KIT_ENV", "/etc/mc-host/kit.env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh.read().splitlines():
+                m = KIT_ENV_LINE.fullmatch(line)
+                if m and m.group(1) == key:
+                    return m.group(2)
+    except OSError as exc:
+        sys.exit(f"{os.path.basename(sys.argv[0])}: cannot read kit.env at {path} ({exc.strerror}): sudo bash host/setup.sh")
+    sys.exit(f"{os.path.basename(sys.argv[0])}: kit.env at {path} has no {key}: python3 kit/render.py, then setup.sh")
+# <<< kit_value
+
 
 MIN = 60
 WIRED_UP_AFTER = 4 * MIN
@@ -290,7 +316,8 @@ def act(action, state, prev_last_reboot, now):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="asus-node network watchdog.")
+    global WIRED
+    ap = argparse.ArgumentParser(description="Game host network watchdog.")
     ap.add_argument("--probe", action="store_true", help="print the health verdict only")
     args = ap.parse_args(argv)
 
@@ -298,6 +325,11 @@ def main(argv=None):
     if args.probe:  # both, strictly: setup.sh arms the watchdog only on this
         print(f"{'healthy' if gw_ok and ts_ok else 'UNHEALTHY'}: {detail}")
         return 0 if gw_ok and ts_ok else 1
+
+    # Before any state is read or written: a refusal changes nothing.
+    WIRED = WIRED or kit_value("MC_WIRED_CONN") or kit_value("MC_WIFI_CONN")
+    if not WIRED:  # kitconfig refuses a kit.toml with neither; never `nmcli connection up id ""`
+        sys.exit("mc-netwatch: kit.env names no network connection (MC_WIRED_CONN, MC_WIFI_CONN): python3 kit/render.py")
 
     now = time.time()
     state = load_state()

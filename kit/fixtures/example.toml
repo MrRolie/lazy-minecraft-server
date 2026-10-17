@@ -1,0 +1,51 @@
+# A made-up kit instance for the tests: a valid kit.toml in the shape of a real one (a wired laptop with a static
+# address and a Wi-Fi fallback, a kit guild), with nothing real in it: a common home-router LAN (private, as the
+# bridge fence's drops assume), fake snowflakes, and a tailnet name that is not one. The tests that need a config
+# and are not about one particular server read this file, so they run the same in any copy of the repo. A test about
+# the friends' own server reads its record (kit/fixtures/asus-node.toml) and skips where a copy dropped it
+# (kit/INSTANCE-PATHS).
+
+[host]
+name = "kit-box"
+user = "alex"
+home = "/home/alex"
+repo = "/home/alex/minecraft-ai-host"
+uid = 1000
+gid = 1000
+tz = "America/Toronto"
+
+[server]
+memory = "8G"
+view_distance = 8
+simulation_distance = 6
+difficulty = "hard"
+max_players = 12
+eula_accepted = true
+open_date = 2026-10-02
+
+[schedule]
+maint_start = "04:00"
+
+[net]
+mode = "static"
+wired_conn = "Wired connection 1"
+wifi_conn = "ExampleWiFi"
+static_addr = "192.168.1.5/24"
+gateway = "192.168.1.1"
+dns = ["192.168.1.1", "1.1.1.1"]
+dhcp_pool = "192.168.1.10-192.168.1.254"
+
+[tailscale]
+host_name = "kit-box"
+server_address = "kit-box.example-net.ts.net"
+tag = "tag:mc-server"
+
+[discord]
+guild_id = "1600000000000000061"
+bridge_bot_id = "1600000000000000062"
+alert_channel = "ops-log"
+invite_lockdown = true
+profile = "kit"
+
+[pack]
+mode = "vanilla-extended"

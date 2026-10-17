@@ -93,8 +93,8 @@ What it cannot do:
     a minute
 - **Amplify itself into the server log.** Each inbox-driven log line has its own one-a-minute throttle (see "Any
   other type" above), and a refused path is reported at most once a minute per path, so a bridge flipping
-  `inbox.jsonl` between a link and a file every poll gets one line, not two a second. Measured live on the workstation
-  spike (2026-10-01): 327 KB of control-byte lines, 10 truncate-rewrites and 20 link flips grew the server log by
+  `inbox.jsonl` between a link and a file every poll gets one line, not two a second. Measured live on the dev
+  machine's spike (2026-10-01): 327 KB of control-byte lines, 10 truncate-rewrites and 20 link flips grew the server log by
   2.85 MB (2245 lines) on 1.0.3, and by 3.5 KB (5 lines) on 1.0.4.
 - **Forge the server log.** Every inbox-sourced string that reaches the log (the skipped line, a parse error,
   an unknown type, `requested_by`, a refused id or name) is escaped. Controls, ESC, CR, LF, bidi controls and
@@ -179,7 +179,7 @@ Both sides' tests consume these files, and they are the executable form of this 
 - `inbox.expected.jsonl`: the exact handler calls the mod makes for `inbox.jsonl`, in order (with `name_valid` for
   each `whitelist_add`). The partial line yields nothing, and the offset stops before it.
 
-## Clarifications (ve-commands 1.0.4, verified on the workstation spike 2026-10-01)
+## Clarifications (ve-commands 1.0.4, verified on the dev machine's spike 2026-10-01)
 
 These pin down behaviour that v1 left open. None of them changes a field.
 

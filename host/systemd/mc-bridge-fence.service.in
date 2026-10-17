@@ -1,6 +1,6 @@
 [Unit]
 Description=Egress fence for the Discord bridge network br-mcve (raw-table drops to host, LAN and tailnet)
-Documentation=file:///home/mm-mike/minecraft-ai-host/bridge/README.md
+Documentation=file://@MC_REPO@/bridge/README.md
 # BEFORE dockerd: the drops exist before any container with a restart policy comes back at boot. It runs the
 # root-owned copy setup.sh installs in /usr/local/sbin, never a checkout path.
 After=network-pre.target

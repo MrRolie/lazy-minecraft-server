@@ -1,9 +1,9 @@
-# Vanilla Extended — the pack, as code. Design: docs/direction/2026-09-28_pack-design.md (option A, 2026-09-29).
+# Vanilla Extended — the pack, as code (design: option A, 2026-09-29).
 # Build: python3 pack/build.py [--chapter N] [--update]. The resolved exact versions live in pack/lock.json.
 #
 # side:    server = server only (client: unsupported)   client = client only (server: unsupported)   both
 # chapter: 1 = launch; later chapters only ADD mods (removing a mod deletes its blocks/items from the world).
-# Cut after the 2026-09-29 spike (docs/direction/2026-09-28_pack-design.md §13):
+# Cut after the 2026-09-29 spike:
 #   end-remastered-additions — its advancement override breaks End Remastered's whole eye-hunt tab without BOMD/Aether
 #   mes-moogs-end-structures + moogs-structure-lib — ~0 structures inside the End rings; one /locate tripped the watchdog
 # pin:     optional exact Modrinth version id; otherwise --update takes the newest release (pre-release only if

@@ -1,134 +1,161 @@
-# Vanilla Extended
+# Lazy Minecraft Server
 
-An old laptop that was gathering dust now runs a modded Minecraft Java server for a group of about ten friends.
-They join through a private network link and a Discord server set up for the group. The server looks after
-itself: nightly backups, an early-morning update window, a restart when it hangs, and reboots only when nobody
-is playing.
+Laziness here is engineered.
 
-This is a public snapshot of a private repository, taken on 2026-10-14 from commit `9a9db5b`. The commit history
-and the operational runbook stay private because they are full of home-network detail. The friends' Discord text
-is replaced by a short example. Network names and addresses, the Wi-Fi name, the server address and the Discord IDs
-are replaced by placeholders, and one test that read the runbook is removed. `AGENTS.md` (the runbook), `docs/`
-(design briefs) and `discord/posts/`, which the code and `CLAUDE.md` refer to, stay private.
+A modded Minecraft server for you and your friends, on an old laptop you already own. Claude Code does the setup:
+your Discord server's channels, the private network, the Minecraft server itself, backups and self-repair. You do the handful
+of steps only a person can do, and then you play.
 
-## Status
+## Who it's for
 
-Open to friends since 2026-10-02. Per Mikael (2026-10-14), friends have joined and played, Discord messages
-reach the game, a friend ran `/whitelist`, and `/discovery` or `/coords` have posted to Discord.
+Part-time players who want a server for their group without spending their free evenings running it.
 
-## How friends get in
+## What you do, what Claude does
 
-The launch post's four steps (its estimate: about 10 minutes):
+**You, once:** about 20 steps, or 19 if you already have a Discord account. Most of them are accounts (a Claude
+plan, Discord, Tailscale), installing Ubuntu, logging Claude in, creating the two Discord bots and clicking their
+invites, signing in to Tailscale, and choosing the game. A Wi-Fi password or a fixed address adds a step, only if
+your setup needs one.
 
-1. Install Tailscale and accept the share link.
-2. Import the pack file into Prism or the Modrinth App.
-3. Type `/whitelist <your Minecraft name>` in the Discord server.
-4. Open Multiplayer: the server is already listed, from a `servers.dat` that `pack/build.py` writes into the pack.
+**Each friend, once:** 10 steps: own Minecraft Java Edition, join your Discord, install Tailscale and accept the
+share, install a launcher, import the pack, whitelist themselves.
 
-## Discord
+**You, now and then:** 2 steps: a fresh share link for a late friend, and logging Claude Code back in when asked.
 
-The bridge (`bridge/`) and a server-only mod (`mod/`) carry:
+Every step, and where to click: [docs/kit/HUMAN-STEPS.md](docs/kit/HUMAN-STEPS.md). To begin: the "Start"
+section of [kit/README.md](kit/README.md).
 
-- game chat both ways with `#game-chat`, plus joins and leaves
-- `/whitelist <name>`, a Discord slash command; the server looks the name up with Mojang and adds it
-- `/discovery <note>` to `#discoveries` with its coordinates, and `/coords <name>` to `#coords`
-- the online player count as the bot's presence
-- ops alerts in `#ops-log` (every whitelist request, a restart without a clean stop, the game going silent),
-  plus host alerts by webhook through `host/bin/mc-alert`
+**Claude does the rest,** and tells you when it needs you. It checks the laptop and stops with a plain reason if
+the kit can't run there. It installs Docker and Tailscale and sets up friend access. It builds your Discord
+server's channels, the chat bridge between the game and Discord, and an alerts channel. It builds the pack, sets
+the laptop up to run unattended, starts Minecraft and pre-generates the world. Then it restarts the laptop once to
+prove everything comes back by itself.
 
-The guild's channels, topics and bot-posted copy are code: `discord/layout.toml`, applied by `discord/sync.py`
-(dry run first, then `--apply`, then a re-run that must print `0 actions`).
+Claude never creates accounts or types passwords. Bot tokens go through a hidden prompt you run in a second terminal
+window, into files only your account can read.
+
+## Pick the experience
+
+**Vanilla Extended** is the default: Minecraft as if Mojang had kept adding structures, bosses and places to
+explore, and it still feels like Minecraft.
+
+Or tell your Claude the experience you want, or a pack you already know. It researches and assembles one from
+Modrinth (Modrinth only), sized to your laptop's memory, on Vanilla Extended's Minecraft version so
+the Discord bridge still works. The pack must pass the same build checks and a recorded test boot
+([docs/kit/CUSTOM-PACK.md](docs/kit/CUSTOM-PACK.md)). That proves it builds and boots. Whether it is fun is for
+your group to find out by playing. This custom path has not yet run end to end on a kit host.
+
+## What you need
+
+- **An old laptop with 16 GB of RAM**, an SSD with **50 GB free**, and a network cable to your router (Wi-Fi alone
+  is supported but not yet tested). 16 GB is the only size proven so far. Below that, Claude tells you and lets you decide.
+- **A USB stick of 12 GB or more**, and another computer to make it on. The laptop gets a fresh Ubuntu Desktop
+  24.04 LTS; the account you make there must be its first.
+- **A Claude plan that includes Claude Code** (Pro or Max).
+- **A Discord account** and **a Tailscale account.**
+- **Friends** with Minecraft Java Edition, and Prism Launcher or the Modrinth App.
+- The laptop stays plugged in and switched on; closing the lid is fine.
+
+## How long it took, once
+
+One recorded run, on a fresh virtual machine (Ubuntu 24.04, 16 GB, 4 vCPU, wired), not on a laptop:
+
+- Installing Ubuntu and Claude Code (steps 1 to 6): about 15 min.
+- The Claude-driven setup: about 1 h 55 min. Of that, Discord with the person clicking took 14.6 min, Tailscale
+  12.4 min, and world pre-generation 1 h 07 min, stopped at 46%.
+
+A full pre-generation would have added about 2 to 3 hours there, unattended. On the original laptop it took about
+7.7 hours.
+
+## Proven so far, and not yet
+
+**The original server.** It runs on an old ASUS laptop (i5-7200U, 2 cores / 4 threads, 15 GiB RAM) for a group of
+friends, open since 2026-10-02. It runs the version the kit was generalized from, not the kit itself.
+
+**The kit.** Its fresh setup is proven once, on the virtual machine above: every phase ran, Discord-to-game chat
+and `/whitelist` worked, and the test restart came back on its own. What that run found is fixed (in code with tests, or in
+the docs), except one open finding (below), and no run has gone through those fixes yet.
+
+**Not yet:**
+- No kit run on a real old laptop, so the Wi-Fi fallback, a fixed address, the battery charge cap and the BIOS
+  power-on setting are untested.
+- The run stopped world pre-generation early.
+- The custom-pack path has not run end to end.
+- Game-to-Discord chat was not checked by eye in the run (Discord-to-game was).
+- One open finding: the Nether and End borders reverted once after a cancel and a restart. A gate caught it; it
+  has not been reproduced.
+
+## How it stays private
+
+- **No port forwarding.** Friends reach the server through a Tailscale share of the laptop and never join your
+  Tailscale network.
+- **RCON is never published,** and only whitelisted players can join.
+- **The chat bridge is its own, weaker Discord bot.** It talks to the server only through files
+  (`mod/CONTRACT.md`), on its own Docker network, and `host/bin/mc-bridge-fence` blocks it from the laptop, your
+  home network and the tailnet.
+- **Tokens, the share link and the alert webhook stay in files outside git** (`.gitignore`). `.env.example` and
+  `.env.bridge.example` show their shape.
 
 ## How it looks after itself
 
 - **Never sleeps.** `host/setup.sh` masks the sleep targets; `host/conf/logind-10-mc-host.conf` ignores the lid.
-- **Network watchdog.** `host/bin/mc-netwatch` checks the gateway and Tailscale every 2 minutes. With both down
-  it brings the wired link up at 4 minutes, restarts Tailscale at 8 and reboots at 15, at most once per 6 hours.
-  Wi-Fi is configured as a fallback.
-- **Hang watchdog.** `host/bin/mc-heal` asks for the player list over RCON every 2 minutes. After 3 failed probes
-  spanning at least 6 minutes it saves the logs, stops the server, starts it again and alerts.
-- **Out of memory.** `docker-compose.yml` passes `-XX:+ExitOnOutOfMemoryError`, so the JVM exits and Docker
-  restarts it.
-- **Backups.** `deploy/backup.sh` runs at 04:00 (`host/systemd/mc-backup.timer`), flushes the world over RCON,
-  checks the tar with `gzip -t` and keeps 7 days. A failed run posts a Discord alert.
-- **Update window.** Unattended upgrades at 05:00 for Ubuntu and Tailscale; Docker is blacklisted
-  (`host/conf/apt-52mc-host`).
-- **Reboots only when nobody is online.** `host/bin/mc-maint` runs at 05:40 and reboots only if one is required
-  and RCON reports 0 players or the server is stopped. Otherwise it defers and alerts.
-- **Key-only SSH.** `host/conf/sshd-10-mc-host.conf`.
-
-`host/setup.sh` installs the host side idempotently (the server unit and the backup timer are enabled by hand at
-first start-up); `host/check.sh` prints PASS or FAIL per property.
-
-## How access stays private
-
-- No port forwarding. Friends reach the laptop through a Tailscale node share; they never join the tailnet.
-- RCON is never published, and the whitelist is enforced.
-- The bridge is its own least-capability Discord bot. It reaches the server only through files
-  (`mod/CONTRACT.md`), on its own Docker network, and `host/bin/mc-bridge-fence` limits it to the public internet.
-- Tokens, the share link and the webhook live in files outside git; the `.env*.example` files show their shape.
-
-## Learned the hard way
-
-- **The laptop dropped off the network for 8 hours.** Another device took its address, and Wi-Fi was switched
-  off. Fix: a static address outside the router's DHCP pool, Wi-Fi unblocked as a fallback, and `mc-netwatch`.
-- **The heap filled during world pre-generation.** A server paused for being empty never unloads the generated
-  chunks, and the out-of-memory JVM then hung for 2 hours. Fix: `deploy/world.sh ring` refuses while pausing is
-  on, and `ExitOnOutOfMemoryError`.
-- **The healthcheck said unhealthy while the server was fine.** Fix: `mc-heal` judges liveness by an RCON answer.
-- **In a test, a clean shutdown took 10.2 s against a 10 s kill timer.** Docker kills a container 10 s after `stop` by
-  default. Fix: the image's runner gets 110 s, Docker 120 s and systemd 180 s (`docker-compose.yml`,
-  `host/systemd/`).
-- **A named volume silently broke log reads** in an earlier version. Fix: the data is a bind mount,
-  `./mc_data:/data`.
-
-## The pack
-
-Minecraft 26.1.2 on Fabric loader 0.19.5. The launch pack runs 35 mods on the server, counted from `pack/mods.toml`
-(chapter 1: 18 server-only and 17 on both sides; 3 more are client-only). The pack is code: `mods.toml` lists the mods, `lock.json` pins exact
-versions, and `build.py` builds the `.mrpack`. `ve-commands` in `mod/` is a server-only Fabric mod that adds
-`/discovery` and `/coords` and talks to the bridge only through the files `mod/CONTRACT.md` defines.
+- **Network watchdog.** `host/bin/mc-netwatch` checks the router and Tailscale every 2 minutes. With both
+  unreachable it brings the link up at 4 minutes, restarts Tailscale at 8 and reboots at 15 (at most once per 6 h).
+- **Hang watchdog.** `host/bin/mc-heal` asks the server for its player list every 2 minutes and restarts it after
+  3 failed checks spanning at least 6 minutes, then alerts.
+- **Out of memory.** The server exits and Docker restarts it (`-XX:+ExitOnOutOfMemoryError`, `docker-compose.yml`).
+- **Nightly backups.** `deploy/backup.sh` at 04:00 (`host/systemd/mc-backup.timer.in`): flushes the world, checks
+  the archive, keeps 7 days. A failed run posts a Discord alert (`host/bin/mc-alert`).
+- **Reboots only when nobody is online.** `host/bin/mc-maint` at 05:40 reboots only if one is needed and nobody is
+  playing; otherwise it waits and alerts.
+- **Update window.** Ubuntu and Tailscale update unattended at 05:00; Docker never does (`host/conf/apt-52mc-host`).
+- **Battery charge cap,** where the hardware allows it: `host/bin/mc-charge-cap` at every boot.
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `docker-compose.yml` | The server and the bridge |
-| `bridge/` | The Discord bridge |
-| `mod/` | `ve-commands` and its contract |
-| `pack/` | The pack as code |
-| `discord/` | The guild layout, `sync.py` and example content |
+| `kit/` | The kit's tools |
+| `docs/kit/` | Claude's procedure, your steps, custom packs, the test run's findings |
+| `docker-compose.yml` | The server and the chat bridge |
+| `pack/` | The pack as code, and its test boot |
+| `mod/` | The server-side mod the bridge talks through |
+| `bridge/` | The Discord chat bridge |
+| `discord/` | The Discord server's layout as code |
 | `host/` | Laptop maintenance as code |
 | `deploy/` | Backups and world admin |
+| `AGENTS.md` | The runbook |
 | `CLAUDE.md` | The rules the agent works under |
-
-## Not a kit
-
-It is written for this one laptop: the host name and paths are fixed in the scripts and units, and the LAN values
-are examples to set, so using it elsewhere means changing those. `host/setup.sh` refuses to run on any host but `asus-node` unless
-`MC_HOST_FORCE=1` is set.
 
 ## Tests
 
 ```sh
-uv run -q --with pytest --with discord.py==2.7.1 pytest -q -p no:cacheprovider host/ pack/ discord/ bridge/ mod/
+uv run --with pytest --with discord.py==2.7.1 pytest
 ```
 
-721 tests pass on this snapshot (2026-10-14).
+On this snapshot (2026-10-16): 1667 pass and 52 skip. Every skip says why: it needs the original server's
+private record, which is not in this copy. Some tests read git history, so run them in a clone, not a bare download.
 
 ## How it was built
 
 Built with Claude Code under Mikael Hillman-Pépin's direction. He set the goals and the rules the agent works
-under; `CLAUDE.md` is that doctrine. Claude wrote the code, the tests and the docs. Changes are checked by the test
-suite and by live proofs on the laptop or on a test copy on a workstation. There is no line-by-line human review. Comments
-that mention "the reviewer" or review rounds (rv1 to rv3) refer to review passes by separate AI sessions; his part
-was deciding the trade-offs they raised.
+under (`CLAUDE.md`); Claude wrote the code, the tests and the docs. Changes are checked by the test suite, by live
+proofs on the laptop or on a test machine, and by review passes from separate AI sessions, including a cross-model
+review. There is no line-by-line human review. Comments that mention "the reviewer", review rounds (rv2, rv3)
+or a "codex review" mean those AI passes.
+
+## This snapshot
+
+A public snapshot of a private repository, taken 2026-10-16 from commit `88f8a4e`. Dropped, exactly as
+`kit/INSTANCE-PATHS` lists: the original server's instance record, its friends' Discord text and posts, and his
+working notes. A few lines elsewhere were edited where they pointed at those files or at private context, and this
+README and the LICENSE are new. The history stays private.
 
 ## History
 
-It began as an AI "dungeon master" that designed weekend events on a pack of about 370 mods. That version was
-retired on 2026-09-28 in favour of a lighter pack, and its code is not in this copy.
+It began as an AI "dungeon master" for weekend events on a pack of about 370 mods, retired on 2026-09-28 for the
+Vanilla Extended friend server (open since 2026-10-02). The kit was generalized from that server in October 2026.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,71 @@
+# kit.toml: this server's one config file. Copy it to the repo root as kit.toml (gitignored), fill it in, then:
+#   python3 kit/render.py            (as the kit user; it renders host/kit.env, the units, and keys in .env files)
+# No secrets go here: tokens stay in .env, .env.bridge and discord/.env.
+# kit/kitconfig.py refuses unknown keys, wrong types and values the kit cannot honour yet, naming each one.
+# A filled-in example (made up; the tests use it): kit/fixtures/example.toml.
+
+[host]
+name = "my-laptop"                     # `hostname`; setup.sh refuses to run on any other machine
+user = "me"                            # the first account the installer made
+home = "/home/me"                      # getent passwd <user>, field 6
+repo = "/home/me/minecraft-ai-host"    # git rev-parse --show-toplevel; the units point here
+uid = 1000                             # must be 1000: itzg and the bridge image write the mailbox as 1000
+gid = 1000
+tz = "America/Toronto"                 # timedatectl show -p Timezone --value; the server's clock and the timers'
+# ram_mib = 15872                      # probe facts, informational
+# cores = 4
+# disk_free_gib = 400
+
+[server]
+memory = "8G"                          # JVM heap. 8G is the one measured value (16 GB laptop); about RAM - 7 GiB
+view_distance = 8
+simulation_distance = 6
+difficulty = "hard"                    # peaceful | easy | normal | hard
+max_players = 12
+# seed = 8675309                       # optional; only acts when the world is first created
+# owner_name = "YourMinecraftName"     # optional; becomes OPS (op level 4) on the first start
+# owner_uuid = "..."                   # optional; used instead of owner_name when set
+eula_accepted = false                  # YOU must read https://aka.ms/MinecraftEULA and set this to true yourself
+# open_date = 2026-10-02               # optional; the day the world opened to friends
+# pause_when_empty_seconds = 60        # optional; -1 while pre-generating (deploy/world.sh ring), then 60. Unset,
+                                       # server.properties is left as it is
+
+[schedule]
+maint_start = "04:00"                  # backup; apt +30 min, upgrades +60, snaps +60..90, reboot check +100.
+                                       # Only 04:00 is wired so far.
+
+[net]
+mode = "dhcp"                          # dhcp (default): the router gives the address. "static": only on request,
+                                       # for a router that cannot reserve one; needs the three keys below
+wired_conn = "Wired connection 1"      # nmcli -t -f NAME,TYPE connection show (type 802-3-ethernet); leave it
+                                       # out on a Wi-Fi-only laptop
+# wifi_conn = "MyWiFi"                 # with wired_conn: the Wi-Fi FALLBACK (only on request). Without
+                                       # wired_conn: a Wi-Fi-only laptop's one link. Its password must be stored
+                                       # system-wide (setup.sh says how)
+# static_addr = "192.168.1.5/24"       # static only: a free address OUTSIDE the router's DHCP pool
+# gateway = "192.168.1.1"              # static only: ip -j route show default
+# dns = ["192.168.1.1", "1.1.1.1"]     # static only
+# dhcp_pool = "192.168.1.10-192.168.1.254"   # informational: the router's pool, which static_addr must avoid
+
+[tailscale]
+host_name = "my-laptop"                # the machine name friends see in Tailscale
+server_address = "my-laptop.tailXXXXXX.ts.net"   # tailscale status --json: Self.DNSName without the final dot
+tag = "tag:mc-server"
+# device_id = "..."                    # optional; from the Tailscale API
+
+[discord]
+guild_id = "000000000000000000"        # the server (guild) id: its one home; render copies it into .env.bridge.
+bridge_bot_id = "000000000000000000"   # the bridge bot's user id. Both: python3 discord/bootstrap.py discover
+                                       # (the zeros are a placeholder kit.toml refuses)
+alert_channel = "ops-log"
+invite_lockdown = true                 # @everyone cannot create invites (design decision, 2026-10-14); sync sets it
+profile = "kit"                        # a fresh guild: no #the-story, no renamed_from history
+
+# [battery]
+# charge_cap = 80                      # 1-100, or "none". Written at every boot (mc-charge-cap.service) where
+                                       # kit/probe.sh found charge_control_end_threshold; reported "written",
+                                       # never "verified"
+
+[pack]
+mode = "vanilla-extended"              # the one verified pack. "custom": a pack the person chose with their
+                                       # Claude, in pack-custom/ (docs/kit/CUSTOM-PACK.md)

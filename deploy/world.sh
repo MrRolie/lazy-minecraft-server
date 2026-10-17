@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
-# World rings: the launch borders and every chapter's border push, as one tool. Runs as mm-mike in the
-# repo dir on asus-node, against the running server, via in-container rcon-cli.
+# World rings: the launch borders and every chapter's border push, as one tool. Runs as the kit user in the
+# repo dir on the game host, against the running server, via in-container rcon-cli.
 #
 #   deploy/world.sh init                 one-time setup for a fresh world (idempotent): gamerules (no locator
 #                                        bar; players_sleeping_percentage 50), and
 #                                        mc_data/mcve/{out,in} (the mod <-> Discord bridge mailbox) owned
-#                                        by mm-mike
+#                                        by the kit user
 #   deploy/world.sh ring <dim> <radius>  set <dim>'s square border to radius (diameter 2r, centre 0,0) and
-#                                        start Chunky pre-generation of exactly that square
+#                                        start Chunky pre-generation of exactly that square; it stamps the world
+#                                        first (mc_data/<LEVEL>/.ve-ring-<dim>), for `done`
 #   deploy/world.sh status               border per dimension + Chunky progress
+#   deploy/world.sh done [<dim>=<radius> ...]
+#                                        exit 0 only when Chunky has FINISHED the last ring started on THIS world
+#                                        in all three dimensions (and, for each <dim>=<radius> given, that ring
+#                                        was that radius); a ring in progress, paused, cancelled, never started,
+#                                        or not started by `ring` fails. Reads files only (the ring stamps,
+#                                        Chunky's task files and the server logs), no rcon
 #   deploy/world.sh maintenance [on <why> | off]
 #                                        show, set or clear the maintenance flag: host/bin/mc-heal never restarts
 #                                        the server while it is set (rings, restores, chapter work). A ring sets
 #                                        it itself; clear it after the ring finishes
 #
-# <dim> is overworld | the_nether | the_end. Borders are per dimension on 26.x (design doc §5/§13).
+# <dim> is overworld | the_nether | the_end. Borders are per dimension on 26.x.
 # A ring only ever GROWS: shrinking a border strands players and builds outside it, so it is refused.
 # Pre-gen runs inside the server (Chunky, continueOnRestart=true via pack overrides), so a maintenance
 # reboot pauses it rather than ending it. Never admin-/locate on the live world (AGENTS.md).
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# The world dir: LEVEL from .env, default "world" (the same read as deploy/backup.sh).
+LEVEL="$( { sed -n 's/^LEVEL=//p' .env 2>/dev/null || true; } | tail -1)"
+LEVEL="${LEVEL:-world}"
 # The maintenance flag, in the repo root (= MAINT_FLAG in host/bin/mc-heal). While it exists mc-heal stands down: a
 # ring's Chunky load can stall RCON in long GC pauses, and with continueOnRestart a heal would restart straight
 # back into the ring. Persistent on purpose: a ring survives a reboot, so the flag must too.
@@ -75,13 +85,20 @@ case "${1:-}" in
     radius="${3:?usage: world.sh ring <dim> <radius>}"
     [[ "$radius" =~ ^[0-9]+$ ]] && [ "$radius" -ge 100 ] || { echo "radius must be an integer >= 100" >&2; exit 2; }
     id="$(dim_id "$dim")"
+    # The ring's stamp goes in the world dir (below), so it leaves with the world when the world is archived.
+    [ -f "mc_data/${LEVEL}/level.dat" ] || {
+      echo "refusing: no world at mc_data/${LEVEL}/level.dat (LEVEL from .env); start the server once first" >&2
+      exit 1
+    }
     # Chunky + pause-when-empty exhausts the heap: a paused server never unloads the chunks Chunky makes
     # (prod OOM 2026-10-01, AGENTS.md hard-won facts). Refuse until pausing is off for the pre-gen.
     props="${MC_PROPERTIES:-mc_data/server.properties}"
     pause="$( { sed -nE 's/^pause-when-empty-seconds=(-?[0-9]+)$/\1/p' "$props" 2>/dev/null || true; } | tail -1)"
     [ -n "$pause" ] || { echo "refusing: can't read pause-when-empty-seconds from ${props}" >&2; exit 1; }
     if [ "$pause" -gt 0 ]; then
-      echo "refusing: pause-when-empty-seconds=${pause} in ${props}; set it to -1 and restart for the pre-gen" >&2
+      echo "refusing: pause-when-empty-seconds=${pause} in ${props}; set it to -1 for the pre-gen: kit.toml" \
+        "server.pause_when_empty_seconds = -1, python3 kit/render.py, docker compose up -d minecraft (without that" \
+        "key, itzg leaves server.properties alone: edit it and restart)" >&2
       exit 1
     fi
     want=$((radius * 2))
@@ -112,6 +129,18 @@ case "${1:-}" in
     rcon "chunky shape square"
     rcon "chunky center 0 0"
     rcon "chunky radius ${radius}"
+    # The stamp, just before Chunky starts: `done` accepts only a task file and a "Task finished" log line newer than
+    # it. Chunky's task files and the logs sit outside the world dir, so an archived world's (or an earlier ring's)
+    # would otherwise vouch for this one (review 2026-10-16). It records latest.log's size and the sha256 of those
+    # bytes: `done` knows that file by them wherever it is later (still latest.log, a `cp -a` copy with new inodes, or
+    # gzipped whole by a restart) and reads only what follows them. Kept when the start is not confirmed: with no newer
+    # task file, `done` fails.
+    stamp="mc_data/${LEVEL}/.ve-ring-${dim}"
+    log_size=0
+    if [ -f mc_data/logs/latest.log ]; then log_size="$(stat -c %s mc_data/logs/latest.log)"; fi
+    log_head="$( { head -c "$log_size" mc_data/logs/latest.log 2>/dev/null || true; } | sha256sum | cut -d' ' -f1)"
+    printf 'radius=%s\nsince=%s\nlog_size=%s\nlog_head=%s\n' "$radius" "$(date -u +%FT%TZ)" "$log_size" "$log_head" \
+      >"$stamp" || { echo "refusing: can't write the ring stamp ${stamp}; Chunky not started" >&2; exit 1; }
     started="$(rcon "chunky start")"
     echo "$started"
     if ! grep -q "Task started in ${id} " <<<"$started"; then
@@ -121,7 +150,8 @@ case "${1:-}" in
     trap - EXIT  # the ring runs: the flag stays until 'maintenance off'
     echo "ring set: ${dim} border ${have} -> ${want}; Chunky pre-generating r=${radius} (status: deploy/world.sh status)"
     echo "maintenance flag set ($(cat "$MAINT_FLAG")): mc-heal stands down. When the ring is done:"
-    echo "  deploy/world.sh maintenance off   (and pause-when-empty-seconds back to 60)"
+    echo "  deploy/world.sh maintenance off   (and pause-when-empty-seconds back to 60: kit.toml"
+    echo "  server.pause_when_empty_seconds = 60 + render + up -d minecraft, or server.properties if kit.toml has no key)"
     ;;
   status)
     for d in overworld the_nether the_end; do
@@ -130,6 +160,111 @@ case "${1:-}" in
     done
     rcon "chunky progress"
     if [ -e "$MAINT_FLAG" ]; then echo "maintenance flag set: $(cat "$MAINT_FLAG") (mc-heal stands down)"; fi
+    ;;
+  done)
+    # Chunky 1.5.3 (pack/lock.json; source commit 7226809 of github.com/pop4959/Chunky = tag 1.5.0 + 3 commits)
+    # keeps one task file per dimension, config/chunky/tasks/minecraft/<dim>.properties (TaskLoader.writeTask). It
+    # is written only when a task ends, is cancelled, or the server stops (GenerationTask.run, TaskLoader.cancelTask,
+    # Chunky.disable), never while it runs: no file = never started (or never saved).
+    #  - cancelled=false: paused or stopped by a shutdown; continueOnRestart picks it up again. Not done.
+    #  - cancelled=true is written BOTH by a cancel and by a task that finished (run(): `else cancelled = true`),
+    #    so it says only "will not resume". The count decides: chunks against the task's total, which for the
+    #    square shape and region pattern a ring uses is (2*ceil(radius/16)+1)^2 (Selection, RegionChunkIterator).
+    #  - A finished task saves before its last in-flight chunks report: run() does not wait for them, and a chunk
+    #    gives back its slot before its count lands, so the saved count can be more than MAX_WORKING_COUNT (50) short
+    #    (asus-node's own finished rings: 51, 51 and 38 short, review 2026-10-16). So below the total, the log line
+    #    Chunky prints the moment the count reaches the total decides, at any shortfall (a cancel never prints it):
+    #    "[Chunky] Task finished for <world>. Processed: <total> chunks" (lang/en.json task_done; config language "en").
+    # All of it must be THIS world's and THIS ring's: the task files and the logs sit outside mc_data/<LEVEL>/, so a
+    # world archived or regenerated in the same mc_data leaves its own behind. `ring` stamps the world dir
+    # (.ve-ring-<dim>) before Chunky starts; only a task file and log text newer than that stamp count. The log the
+    # stamp recorded holds text from before the ring too; it is known by its first bytes (their size and sha256, in
+    # the stamp), not by its inode or name, so a `cp -a` copy and a log a restart gzipped are read past them as well.
+    # MC_DATA points it at a copy of the server directory (a restore rehearsal, or a read-only check of another host):
+    # copy with `cp -a`, which keeps the times the checks compare.
+    data="${MC_DATA:-mc_data}"
+    shift
+    declare -A want_r=()
+    for a in "$@"; do
+      [[ "$a" =~ ^(overworld|the_nether|the_end)=([0-9]+)$ ]] \
+        || { echo "usage: world.sh done [<dim>=<radius> ...] (<dim>: overworld | the_nether | the_end)" >&2; exit 2; }
+      want_r[${BASH_REMATCH[1]}]="${BASH_REMATCH[2]}"
+    done
+    # The log text written since the ring's stamp ($1), from latest.log and every rotated log newer than the stamp.
+    # A log that starts with the bytes the stamp recorded is the one the ring started in: only what follows them is
+    # read. Any other log began after the stamp and is read whole. A stamp without a readable record reads nothing
+    # (fails closed). Whole files are piped to grep: an early-exiting reader would SIGPIPE a writer under pipefail.
+    logs_since() {
+      local s="$1" size head f
+      size="$(sed -n 's/^log_size=//p' "$s" | tail -1)"; head="$(sed -n 's/^log_head=//p' "$s" | tail -1)"
+      [[ "$size" =~ ^[0-9]+$ ]] && [[ "$head" =~ ^[0-9a-f]{64}$ ]] || return 0
+      for f in "${data}/logs/latest.log" "${data}"/logs/*.log.gz; do
+        [ -f "$f" ] && [ "$f" -nt "$s" ] || continue
+        if [ "$( { zcat -f "$f" 2>/dev/null || true; } | head -c "$size" | sha256sum | cut -d' ' -f1)" = "$head" ]; then
+          { zcat -f "$f" 2>/dev/null || true; } | tail -c +"$((size + 1))"
+        else
+          zcat -f "$f" 2>/dev/null || true
+        fi
+      done
+      return 0
+    }
+    bad=0
+    for d in overworld the_nether the_end; do
+      f="${data}/config/chunky/tasks/minecraft/${d}.properties"
+      stamp="${data}/${LEVEL}/.ve-ring-${d}"
+      if [ ! -f "$stamp" ]; then
+        echo "${d}: NOT done: no ring stamp (${stamp}): this world was never rung by deploy/world.sh ring"
+        bad=1; continue
+      fi
+      if [ ! -f "$f" ]; then
+        echo "${d}: NOT done: no Chunky task file (${f}): never started, or still running its first task"
+        bad=1; continue
+      fi
+      if ! [ "$f" -nt "$stamp" ]; then
+        echo "${d}: NOT done: Chunky has saved no task since this world's ring started ($(sed -n 's/^since=//p' \
+          "$stamp")): still running, or ${f} is an older ring's or another world's"
+        bad=1; continue
+      fi
+      prop() { sed -n "s/^$1=//p" "$f" | tail -1; }
+      world="$(prop world)"; cancelled="$(prop cancelled)"; radius="$(prop radius)"
+      shape="$(prop shape)"; pattern="$(prop pattern)"; chunks="$(prop chunks)"
+      cx="$(prop center-x)"; cz="$(prop center-z)"
+      if [ "$world" != "minecraft:${d}" ] || [ "$shape" != square ] || [ "$pattern" != region ] \
+        || ! [[ "$cx" =~ ^-?0(\.0+)?$ ]] || ! [[ "$cz" =~ ^-?0(\.0+)?$ ]] \
+        || ! [[ "$radius" =~ ^[0-9]+(\.0)?$ ]] || ! [[ "$chunks" =~ ^[0-9]+$ ]]; then
+        echo "${d}: NOT done: ${f} is not a world.sh ring (want world=minecraft:${d}, shape=square," \
+          "pattern=region, centre 0,0, a whole radius and a chunk count)"
+        bad=1; continue
+      fi
+      r="${radius%.0}"
+      rc=$(((r + 15) / 16))
+      total=$(((2 * rc + 1) * (2 * rc + 1)))
+      ringr="$(sed -n 's/^radius=//p' "$stamp" | tail -1)"
+      if [ "$r" != "$ringr" ]; then
+        echo "${d}: NOT done: Chunky's last task was radius ${r}, but this world's last ring is radius ${ringr:-?}"
+        bad=1; continue
+      fi
+      if [ -n "${want_r[$d]:-}" ] && [ "$r" != "${want_r[$d]}" ]; then
+        echo "${d}: NOT done: this world's last ring was radius ${r}, not ${want_r[$d]}"
+        bad=1; continue
+      fi
+      pct="$(awk -v c="$chunks" -v t="$total" 'BEGIN { printf "%.1f", 100 * c / t }')"
+      if [ "$cancelled" != true ]; then
+        echo "${d}: NOT done: radius ${r}, ${chunks} of ${total} chunks (${pct}%), paused or stopped; it resumes" \
+          "at the next start (or: chunky continue)"
+        bad=1
+      elif [ "$chunks" -ge "$total" ]; then
+        echo "${d}: done, radius ${r}, ${chunks} of ${total} chunks"
+      elif logs_since "$stamp" | grep -F "[Chunky] Task finished for minecraft:${d}. Processed: ${total} chunks" \
+        >/dev/null; then
+        echo "${d}: done, radius ${r}, ${chunks} of ${total} chunks saved, and the log says it finished"
+      else
+        echo "${d}: NOT done: radius ${r}, cancelled at ${chunks} of ${total} chunks (${pct}%), and no log line" \
+          "since the ring started says it finished"
+        bad=1
+      fi
+    done
+    exit "$bad"
     ;;
   maintenance)
     case "${2:-}" in
@@ -153,7 +288,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

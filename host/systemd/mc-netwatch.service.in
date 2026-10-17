@@ -1,6 +1,6 @@
 [Unit]
-Description=asus-node network watchdog (link fault: nmcli up / tailscaled / reboot; upstream fault: idle tailscaled restart)
-Documentation=file:///home/mm-mike/minecraft-ai-host/AGENTS.md
+Description=@MC_HOST_NAME@ network watchdog (link fault: nmcli up / tailscaled / reboot; upstream fault: idle tailscaled restart)
+Documentation=file://@MC_REPO@/AGENTS.md
 After=NetworkManager.service tailscaled.service
 # A crashing watchdog must not be silent (the alert lands once the network allows).
 OnFailure=mc-alert@%n.service

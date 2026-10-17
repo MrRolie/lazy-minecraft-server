@@ -1,5 +1,5 @@
 #!/bin/sh
-# host/setup.sh and `deploy/world.sh init` create mc_data/mcve/{in,out} as mm-mike (uid 1000). If Docker
+# host/setup.sh and `deploy/world.sh init` create mc_data/mcve/{in,out} as kit.toml host.user (uid 1000). If Docker
 # created in/ first, it is root-owned and the bridge (uid 1000) can't append the inbox, so a ROOT-owned in/
 # (only) is handed to 1000. out/ is the mod's and read-only here: never touched. Any other owner is left
 # alone, and the bridge then refuses to start (not writable), so it never fights check.sh. Then run as 1000

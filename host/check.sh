@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Verify asus-node's host maintenance (what host/setup.sh installs) from LIVE state, not from files
-# alone: each line is PASS/FAIL with the evidence it read. Run as mm-mike: `bash host/check.sh`.
+# Verify the game host's maintenance (what host/setup.sh installs) from LIVE state, not from files
+# alone: each line is PASS/FAIL with the evidence it read. Run as the kit user: `bash host/check.sh`.
+#   --no-ssh   the host owner wants no SSH access (a one-machine kit install, docs/kit/KIT.md P7): the key-only
+#              sshd lines are skipped, and an SSH server that is running FAILs instead. Only the ssh section reads it.
+# The instance values come from host/kit.env (kit/render.py, from kit.toml), the same file setup.sh reads.
 # Root-only reads (sshd -T, snap) use `sudo -n` when available and SKIP otherwise.
 #   PASS/FAIL  a property that must hold (any FAIL -> exit 1)
 #   WARN       owed by the operator or by production stand-up (does not fail the run)
@@ -9,18 +12,52 @@ set -uo pipefail
 
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(realpath "${HOST_DIR}/..")"
-MC_USER=mm-mike
-WIRED="Wired connection 1"
-# Example: set to your Wi-Fi connection's NetworkManager name (as in setup.sh).
-WIFI="HomeWiFi"
+NO_SSH=0
+case "${1:-}" in
+  "") ;;
+  --no-ssh) NO_SSH=1 ;;
+  *) echo "usage: bash host/check.sh [--no-ssh]" >&2; exit 2 ;;
+esac
+# >>> kit config: the instance values, from host/kit.env (kit/render.py). host/test_host.py runs this block.
+KIT_ENV="${HOST_DIR}/kit.env"
+if [ ! -f "$KIT_ENV" ]; then
+  echo "FAIL  ${KIT_ENV} is missing: nothing to check against (python3 kit/render.py renders it from kit.toml)"
+  exit 1
+fi
+# Only render's own lines are sourced: KIT_ENV_LINE in kit/render.py (no $, `, \ or quote inside), for only the
+# keys render writes (kit_env_values; host/test_host.py pins this list), so never PATH, IFS or KIT_ENV.
+KIT_KEYS='MC_HOST_NAME|MC_USER|MC_HOME|MC_REPO|MC_UID|MC_GID|MC_TZ|MC_NET_MODE|MC_WIRED_CONN|MC_WIFI_CONN'
+KIT_KEYS+='|MC_WIRED_ADDR|MC_WIRED_GW|MC_WIRED_DNS|MC_MAINT_START|MC_TS_HOST_NAME|MC_SERVER_ADDRESS|MC_CHARGE_CAP'
+if grep -qvE '^(#.*|('"$KIT_KEYS"')="[^"\\$`]*")?$' "$KIT_ENV"; then
+  echo "FAIL  ${KIT_ENV} has a line that is not KEY=\"value\" (re-render it: python3 kit/render.py)"
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$KIT_ENV"
+for k in MC_HOST_NAME MC_USER MC_HOME MC_NET_MODE MC_CHARGE_CAP; do
+  if [ -z "${!k:-}" ]; then
+    echo "FAIL  ${KIT_ENV} has no ${k} (re-render it: python3 kit/render.py)"
+    exit 1
+  fi
+done
+# Present but possibly empty: empty = kit.toml leaves it out (dhcp; a Wi-Fi-only or wired-only laptop).
+for k in MC_WIRED_CONN MC_WIRED_ADDR MC_WIRED_GW MC_WIRED_DNS MC_WIFI_CONN; do
+  if [ -z "${!k+set}" ]; then
+    echo "FAIL  ${KIT_ENV} has no ${k} (re-render it: python3 kit/render.py)"
+    exit 1
+  fi
+done
+WIRED="$MC_WIRED_CONN"
+WIFI="$MC_WIFI_CONN"
+WIRED_ADDR="$MC_WIRED_ADDR"
+WIRED_GW="$MC_WIRED_GW"
+WIRED_DNS="$MC_WIRED_DNS"
+# <<< kit config
 UNIT_DIR=/etc/systemd/system
+LINGER_DIR=/var/lib/systemd/linger
+UNIT_SRC="${HOST_DIR}/rendered/systemd"
 # shellcheck source=host/lib/net.sh
 . "${HOST_DIR}/lib/net.sh"
-# The static-IP constants have one home, setup.sh; read them from there.
-setup_const() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "${HOST_DIR}/setup.sh"; }
-WIRED_ADDR="$(setup_const WIRED_ADDR)"
-WIRED_GW="$(setup_const WIRED_GW)"
-WIRED_DNS="$(setup_const WIRED_DNS)"
 
 FAILS=0
 res() {
@@ -69,42 +106,64 @@ done
 # ---- network ----------------------------------------------------------------------------------
 section "network"
 nm() { local v; v="$(nmcli -g "$2" connection show "$1" 2>/dev/null)"; printf '%s' "${v%% *}"; }
-if nmcli -g connection.id connection show "$WIRED" >/dev/null 2>&1; then
+if [ -z "$WIRED" ]; then
+  res INFO "no wired connection in kit.toml (Wi-Fi-only laptop)"
+elif nmcli -g connection.id connection show "$WIRED" >/dev/null 2>&1; then
   expect "${WIRED}: connection.autoconnect" yes "$(nm "$WIRED" connection.autoconnect)"
   expect "${WIRED}: connection.autoconnect-retries" 0 "$(nm "$WIRED" connection.autoconnect-retries)"
   expect "${WIRED}: connection.autoconnect-priority" 100 "$(nm "$WIRED" connection.autoconnect-priority)"
   expect "${WIRED}: ipv4.route-metric" 100 "$(nm "$WIRED" ipv4.route-metric)"
-  expect "${WIRED}: ipv4.method" manual "$(nm "$WIRED" ipv4.method)"
-  expect "${WIRED}: ipv4.addresses" "$WIRED_ADDR" "$(norm_list "$(nmcli -g ipv4.addresses connection show "$WIRED" 2>/dev/null)")"
-  expect "${WIRED}: ipv4.gateway" "$WIRED_GW" "$(nm "$WIRED" ipv4.gateway)"
-  expect "${WIRED}: ipv4.dns" "$WIRED_DNS" "$(norm_list "$(nmcli -g ipv4.dns connection show "$WIRED" 2>/dev/null)")"
-  dev="$(nmcli -g GENERAL.DEVICES connection show "$WIRED" 2>/dev/null)"
-  live="$(ip -4 -o addr show dev "${dev:-none}" 2>/dev/null | awk '{ print $4 }' | xargs)"
-  if [ -n "$dev" ] && grep -qw -- "$WIRED_ADDR" <<<"$live"; then
-    res PASS "${dev} holds ${WIRED_ADDR} (live: ${live})"
+  if [ "$MC_NET_MODE" = static ]; then
+    expect "${WIRED}: ipv4.method" manual "$(nm "$WIRED" ipv4.method)"
+    expect "${WIRED}: ipv4.addresses" "$WIRED_ADDR" "$(norm_list "$(nmcli -g ipv4.addresses connection show "$WIRED" 2>/dev/null)")"
+    expect "${WIRED}: ipv4.gateway" "$WIRED_GW" "$(nm "$WIRED" ipv4.gateway)"
+    expect "${WIRED}: ipv4.dns" "$WIRED_DNS" "$(norm_list "$(nmcli -g ipv4.dns connection show "$WIRED" 2>/dev/null)")"
+    dev="$(nmcli -g GENERAL.DEVICES connection show "$WIRED" 2>/dev/null)"
+    live="$(ip -4 -o addr show dev "${dev:-none}" 2>/dev/null | awk '{ print $4 }' | xargs)"
+    if [ -n "$dev" ] && grep -qw -- "$WIRED_ADDR" <<<"$live"; then
+      res PASS "${dev} holds ${WIRED_ADDR} (live: ${live})"
+    else
+      res FAIL "${WIRED} device '${dev:-inactive}' does not hold ${WIRED_ADDR} (live: '${live}')"
+    fi
   else
-    res FAIL "${WIRED} device '${dev:-inactive}' does not hold ${WIRED_ADDR} (live: '${live}')"
+    expect "${WIRED}: ipv4.method (kit.toml net.mode=dhcp)" auto "$(nm "$WIRED" ipv4.method)"
   fi
 else
   res FAIL "NetworkManager connection '${WIRED}' not found"
 fi
-wlan_soft="$(rfkill -n -o TYPE,SOFT 2>/dev/null | awk '$1 == "wlan" { print $2 }' | sort -u | tr '\n' ' ')"
-expect "rfkill wlan soft-block" "unblocked " "$wlan_soft"
-expect "nmcli radio wifi" enabled "$(nmcli radio wifi 2>/dev/null)"
-if nmcli -g connection.id connection show "$WIFI" >/dev/null 2>&1; then
+if [ -n "$WIFI" ]; then
+  wlan_soft="$(rfkill -n -o TYPE,SOFT 2>/dev/null | awk '$1 == "wlan" { print $2 }' | sort -u | tr '\n' ' ')"
+  expect "rfkill wlan soft-block" "unblocked " "$wlan_soft"
+  expect "nmcli radio wifi" enabled "$(nmcli radio wifi 2>/dev/null)"
+fi
+if [ -z "$WIFI" ]; then
+  res INFO "no Wi-Fi connection in kit.toml (no Wi-Fi fallback)"
+elif nmcli -g connection.id connection show "$WIFI" >/dev/null 2>&1; then
   ac="$(nm "$WIFI" connection.autoconnect)" pr="$(nm "$WIFI" connection.autoconnect-priority)"
   me="$(nm "$WIFI" ipv4.route-metric)" flags="$(nm "$WIFI" 802-11-wireless-security.psk-flags)"
   perms="$(nm "$WIFI" connection.permissions)" wmeth="$(nm "$WIFI" ipv4.method)"
-  evidence="autoconnect=${ac} priority=${pr} metric=${me} ipv4.method=${wmeth} psk-flags=${flags} permissions='${perms}'"
-  if [ "$ac" = yes ] && [ "$pr" = 10 ] && [ "$me" = 600 ] && [ "$wmeth" = auto ] && [ "$flags" = 0 ] && [ -z "$perms" ]; then
-    res PASS "${WIFI} fallback: ${evidence}"
-  elif [ "$flags" != 0 ] || [ -n "$perms" ]; then
-    res WARN "${WIFI} fallback not configured: password not stored system-wide (${evidence}); see setup.sh next steps"
-  else
-    res FAIL "${WIFI} fallback: ${evidence} (want autoconnect=yes priority=10 metric=600 ipv4.method=auto)"
+  if [ -n "$WIRED" ]; then  # the wired link's fallback
+    evidence="autoconnect=${ac} priority=${pr} metric=${me} ipv4.method=${wmeth} psk-flags=${flags} permissions='${perms}'"
+    if [ "$ac" = yes ] && [ "$pr" = 10 ] && [ "$me" = 600 ] && [ "$wmeth" = auto ] && [ "$flags" = 0 ] && [ -z "$perms" ]; then
+      res PASS "${WIFI} fallback: ${evidence}"
+    elif [ "$flags" != 0 ] || [ -n "$perms" ]; then
+      res WARN "${WIFI} fallback not configured: password not stored system-wide (${evidence}); see setup.sh next steps"
+    else
+      res FAIL "${WIFI} fallback: ${evidence} (want autoconnect=yes priority=10 metric=600 ipv4.method=auto)"
+    fi
+  else  # a Wi-Fi-only laptop's one link: it must come up at boot with nobody logged in
+    retries="$(nm "$WIFI" connection.autoconnect-retries)"
+    evidence="autoconnect=${ac} autoconnect-retries=${retries} psk-flags=${flags} permissions='${perms}'"
+    if [ "$ac" = yes ] && [ "$retries" = 0 ] && [ "$flags" = 0 ] && [ -z "$perms" ]; then
+      res PASS "${WIFI} (the only link): ${evidence}"
+    else
+      res FAIL "${WIFI} (the only link): ${evidence} (want autoconnect=yes autoconnect-retries=0, password stored system-wide; sudo bash host/setup.sh)"
+    fi
   fi
-else
+elif [ -n "$WIRED" ]; then
   res WARN "no '${WIFI}' connection: no Wi-Fi fallback"
+else
+  res FAIL "no '${WIFI}' connection, and it is this laptop's only link (kit.toml net.wifi_conn)"
 fi
 # NetworkManager's address conflict detection (ACD, on by default: ipv4.dad-timeout -1 = 200 ms), this boot
 # only. A conflict for the address the wired connection has NOW is a FAIL (NM dropped it and re-probes: the
@@ -116,7 +175,8 @@ fi
 if [ -z "$nm_journal" ]; then
   res SKIP "NetworkManager journal unreadable (add ${MC_USER} to adm, or use sudo)"
 else
-  wired_ip="$(norm_list "$(nmcli -g ipv4.addresses connection show "$WIRED" 2>/dev/null)")"
+  wired_ip=""
+  [ -n "$WIRED" ] && wired_ip="$(norm_list "$(nmcli -g ipv4.addresses connection show "$WIRED" 2>/dev/null)")"
   wired_ip="${wired_ip%%/*}"
   all_conflicts="$(conflict_lines <<<"$nm_journal")"
   mine="$( [ -n "$wired_ip" ] && lines_for_ip "$wired_ip" <<<"$all_conflicts")"
@@ -154,13 +214,32 @@ fi
 
 # ---- deployed files ---------------------------------------------------------------------------
 section "installed scripts and units match the repo"
+# The render first: if kit.env or the units are not what kit.toml says, the comparisons below compare old values.
+# -B: under sudo, an import would leave a root-owned kit/__pycache__ in the kit user's checkout.
+if render_out="$(python3 -B "${REPO}/kit/render.py" --check --host-only 2>&1)"; then
+  res PASS "host/kit.env and host/rendered/ match kit.toml"
+else
+  res FAIL "host/kit.env or host/rendered/ does not match kit.toml: $(grep -v '^[0-9]* stale' <<<"$render_out" | tr '\n' ' ')(python3 kit/render.py)"
+fi
+# The keys render owns in .env and .env.bridge, by name (never a value). A compose key in .env that differs from
+# kit.toml is live at the next `up -d minecraft` (docker-compose.yml reads it as ${KEY:-default}), render or not.
+if env_out="$(python3 -B "${REPO}/kit/render.py" --check --env-only 2>&1)"; then
+  res PASS ".env and .env.bridge hold kit.toml's keys"
+else
+  res FAIL ".env or .env.bridge does not match kit.toml: $(grep -v '^[0-9]* stale' <<<"$env_out" | tr '\n' ' ')(python3 kit/render.py)"
+fi
+if cmp -s "$KIT_ENV" /etc/mc-host/kit.env; then
+  expect "/etc/mc-host/kit.env owner+mode" "root:${MC_USER} 640" "$(stat -c '%U:%G %a' /etc/mc-host/kit.env)"
+else
+  res FAIL "/etc/mc-host/kit.env missing, unreadable or differs from host/kit.env (the host/bin scripts read it; sudo bash host/setup.sh)"
+fi
 for f in "${HOST_DIR}"/bin/mc-*; do
   dst="/usr/local/sbin/$(basename "$f")"
   if cmp -s "$f" "$dst" && [ -x "$dst" ]; then res PASS "$dst"; else res FAIL "$dst missing, not executable, or differs from the repo"; fi
 done
-for f in "${HOST_DIR}"/systemd/*.service "${HOST_DIR}"/systemd/*.timer "${HOST_DIR}"/systemd/*.d/*.conf; do
-  rel="${f#"${HOST_DIR}"/systemd/}"
-  if cmp -s "$f" "${UNIT_DIR}/${rel}"; then res PASS "${UNIT_DIR}/${rel}"; else res FAIL "${UNIT_DIR}/${rel} missing or differs from the repo"; fi
+for f in "${UNIT_SRC}"/*.service "${UNIT_SRC}"/*.timer "${UNIT_SRC}"/*.d/*.conf; do
+  rel="${f#"${UNIT_SRC}"/}"
+  if cmp -s "$f" "${UNIT_DIR}/${rel}"; then res PASS "${UNIT_DIR}/${rel}"; else res FAIL "${UNIT_DIR}/${rel} missing or differs from host/rendered/systemd"; fi
 done
 
 # ---- timers and units -------------------------------------------------------------------------
@@ -208,11 +287,40 @@ elif [ "$en" = disabled ]; then
 else
   res FAIL "mc-server.service is-enabled=${en:-not installed}"
 fi
-if [ -e "/home/${MC_USER}/.config/systemd/user/mc-backup.timer" ] || [ -e "/home/${MC_USER}/.config/systemd/user/mc-backup.service" ]; then
+if [ -e "${MC_HOME}/.config/systemd/user/mc-backup.timer" ] || [ -e "${MC_HOME}/.config/systemd/user/mc-backup.service" ]; then
   res FAIL "old --user mc-backup units still in ~${MC_USER}/.config/systemd/user/"
 else
   res PASS "no --user mc-backup units left"
 fi
+
+# ---- linger + charge cap ----------------------------------------------------------------------
+section "linger and battery charge cap"
+# >>> linger
+if [ -e "${LINGER_DIR}/${MC_USER}" ]; then
+  res PASS "linger on for ${MC_USER}"
+else
+  res FAIL "linger off for ${MC_USER} (sudo bash host/setup.sh, step 12)"
+fi
+# <<< linger
+# >>> charge cap
+if [ "$MC_CHARGE_CAP" = none ]; then
+  if [ -e "${UNIT_DIR}/mc-charge-cap.service" ]; then
+    res FAIL "no charge cap in kit.toml, but ${UNIT_DIR}/mc-charge-cap.service is installed (sudo bash host/setup.sh removes it)"
+  else
+    res INFO "no battery charge cap configured (kit.toml battery.charge_cap)"
+  fi
+else
+  cap_en="$(systemctl is-enabled mc-charge-cap.service 2>/dev/null)"
+  cap_res="$(systemctl show mc-charge-cap.service -p Result --value 2>/dev/null)"
+  cap_act="$(systemctl show mc-charge-cap.service -p ActiveState --value 2>/dev/null)"
+  if [ "$cap_en" = enabled ] && [ "$cap_act" = active ] && [ "$cap_res" = success ]; then
+    # Written, never verified: drivers round the value, and asus-wmi reads back its own cached copy.
+    res PASS "charge cap ${MC_CHARGE_CAP} WRITTEN this boot by mc-charge-cap.service (not verified: the readback is the driver's)"
+  else
+    res FAIL "mc-charge-cap.service is-enabled=${cap_en:-none} ActiveState=${cap_act:-none} Result=${cap_res:-none}: cap ${MC_CHARGE_CAP} not written this boot (journalctl -u mc-charge-cap.service)"
+  fi
+fi
+# <<< charge cap
 
 # ---- docker -----------------------------------------------------------------------------------
 section "docker"
@@ -222,7 +330,7 @@ expect "docker info LiveRestoreEnabled" true "$(docker info --format '{{.LiveRes
 if (cd "$REPO" && docker compose config -q >/dev/null 2>&1); then
   res PASS "docker compose config parses"
 else
-  res FAIL "docker compose config FAILS: most likely .env.bridge (a malformed line, wrong owner or mode, or a directory; see 'bridge token file' below). Run 'docker compose config -q' yourself to see why (its error can quote the file)"
+  res FAIL "docker compose config FAILS: most likely .env.bridge (a malformed line, wrong owner or mode, or a directory; see its shape-only lines in 'bridge mailbox' below) or .env (python3 kit/render.py --check names the key). Never print compose's own error: it can quote a token"
 fi
 grace="$(cd "$REPO" && docker compose config --format json 2>&1 | python3 -c 'import json,sys
 try:
@@ -268,7 +376,7 @@ if [ -n "$mc_id" ]; then
   else
     res FAIL "running container scope docker-${mc_id:0:12}….scope: ${scope_show}(want LoadState=loaded TimeoutStopUSec=3min; cgroup driver: $(docker info --format '{{.CgroupDriver}}' 2>&1))"
   fi
-elif cmp -s "${HOST_DIR}/systemd/docker-.scope.d/10-mc-host.conf" "${UNIT_DIR}/docker-.scope.d/10-mc-host.conf"; then
+elif cmp -s "${UNIT_SRC}/docker-.scope.d/10-mc-host.conf" "${UNIT_DIR}/docker-.scope.d/10-mc-host.conf"; then
   res PASS "no minecraft container running; ${UNIT_DIR}/docker-.scope.d/10-mc-host.conf present (TimeoutStopSec=180)"
 else
   res FAIL "no minecraft container running, and ${UNIT_DIR}/docker-.scope.d/10-mc-host.conf is missing or differs"
@@ -346,21 +454,33 @@ fi
 
 # ---- ssh --------------------------------------------------------------------------------------
 section "ssh"
-if cmp -s "${HOST_DIR}/conf/sshd-10-mc-host.conf" /etc/ssh/sshd_config.d/10-mc-host.conf; then
-  res PASS "/etc/ssh/sshd_config.d/10-mc-host.conf matches the repo"
+if [ "$NO_SSH" = 1 ]; then
+  # No SSH wanted: nothing may listen for it. Both units must read exactly "inactive" (a unit that does not exist
+  # does too); anything else, or a systemctl that does not answer, FAILs.
+  ssh_state="$(systemctl is-active ssh.service ssh.socket 2>/dev/null | xargs)"
+  if [ "$ssh_state" = "inactive inactive" ]; then
+    res PASS "--no-ssh: no SSH server running (ssh.service, ssh.socket: ${ssh_state})"
+  else
+    res FAIL "--no-ssh, but ssh.service/ssh.socket are '${ssh_state}': make it key-only (setup.sh step 8) and run check.sh without --no-ssh, or stop and disable them"
+  fi
+  res SKIP "key-only sshd config (--no-ssh: no SSH access wanted)"
 else
-  res FAIL "/etc/ssh/sshd_config.d/10-mc-host.conf missing or differs"
-fi
-sshd_t="$(as_root sshd -T 2>&1)"
-rc=$?
-if [ "$rc" -eq 99 ]; then
-  res SKIP "sshd -T effective config (needs sudo; run 'sudo bash host/check.sh' for it)"
-elif [ "$rc" -ne 0 ]; then
-  res FAIL "sshd -T failed: ${sshd_t:0:200}"
-else
-  for kv in "passwordauthentication no" "kbdinteractiveauthentication no" "permitrootlogin no" "pubkeyauthentication yes"; do
-    if grep -qx "$kv" <<<"$sshd_t"; then res PASS "sshd -T: ${kv}"; else res FAIL "sshd -T: want '${kv}', have '$(grep "^${kv% *} " <<<"$sshd_t")'"; fi
-  done
+  if cmp -s "${HOST_DIR}/conf/sshd-10-mc-host.conf" /etc/ssh/sshd_config.d/10-mc-host.conf; then
+    res PASS "/etc/ssh/sshd_config.d/10-mc-host.conf matches the repo"
+  else
+    res FAIL "/etc/ssh/sshd_config.d/10-mc-host.conf missing or differs"
+  fi
+  sshd_t="$(as_root sshd -T 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 99 ]; then
+    res SKIP "sshd -T effective config (needs sudo; run 'sudo bash host/check.sh' for it)"
+  elif [ "$rc" -ne 0 ]; then
+    res FAIL "sshd -T failed: ${sshd_t:0:200}"
+  else
+    for kv in "passwordauthentication no" "kbdinteractiveauthentication no" "permitrootlogin no" "pubkeyauthentication yes"; do
+      if grep -qx "$kv" <<<"$sshd_t"; then res PASS "sshd -T: ${kv}"; else res FAIL "sshd -T: want '${kv}', have '$(grep "^${kv% *} " <<<"$sshd_t")'"; fi
+    done
+  fi
 fi
 
 # ---- bridge mailbox ---------------------------------------------------------------------------

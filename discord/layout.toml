@@ -1,7 +1,8 @@
 # The friend Discord guild, as code. Apply with `python3 discord/sync.py --apply`
 # (dry run without the flag). Text channel names: lowercase, dashes, no spaces.
 # read_only = only the bot/admins post; private = hidden from @everyone.
-# extra_bots = user ids of other bots (the bridge) that get the bot's own allow in a locked category.
+# extra_bots = other bots that get the bot's own allow in a locked category: user ids, or "bridge" (its id is
+# kit.toml discord.bridge_bot_id, so this file holds no instance id).
 
 [guild]
 system_channel = "general"   # where Discord posts "X joined the server"
@@ -68,7 +69,7 @@ name = "VOICE"
 [[category]]
 name = "ADMIN"
 private = true
-extra_bots = ["123456789012345678"]   # MC Relay, the bridge bot, so it can post to #ops-log (bridge/README.md)
+extra_bots = ["bridge"]   # the bridge bot (its id: kit.toml discord.bridge_bot_id), so it can post to #ops-log (bridge/README.md)
 
   [[category.channel]]
   name = "ops-log"

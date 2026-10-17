@@ -48,7 +48,7 @@ def test_every_example_event_is_read_parsed_and_routed(evs):
         assert core.event_age(e, 0) is not None, f"unreadable ts: {e['ts']}"
 
 
-# What the bridge does with each example line, in order. Checked against bridge/README.md when the table was written.
+# What the bridge does with each example line, in order. Checked against bridge/README.md.
 EXPECTED = [
     ("server", "started"),
     ("presence", ("custom", "Server empty")),

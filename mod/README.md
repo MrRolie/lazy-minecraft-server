@@ -16,7 +16,7 @@ greedy-string argument, so they reach clients through the server's normal comman
 
 ## Build
 
-The build runs inside Docker, so the workstation needs no JDK 25. The Gradle home sits under `$HOME`, because snap Docker
+The build runs inside Docker, so the build machine needs no JDK 25. The Gradle home sits under `$HOME`, because snap Docker
 cannot bind-mount `/tmp`.
 
 ```sh
@@ -30,6 +30,12 @@ docker run --rm -u "$(id -u):$(id -g)" \
 #    which read mod/contract-examples/ (hence the whole mod/ mount)
 ```
 
+**`bash mod/build.sh`** wraps this for a host (kit phase P5): it refuses unless `gradle.properties`, the pin in
+`mod/RELEASE.sha256` and compose's `MODS` name the same jar, builds, checks the jar's sha256 against the pin, and
+installs it in `extras/`. It never deletes or replaces anything in `extras/` (older jars stay for rollback; a
+same-named jar with other bytes is a refusal), and a jar already there with the pinned sha is left alone without a
+build. `--check` runs only the checks.
+
 - **Template:** the official `fabric-example-mod` 26.1.2 branch, with one change: Loom is pinned to the release
   `1.18.2` instead of `1.18-SNAPSHOT`.
 - **No mappings:** 26.1+ ships unobfuscated, so there are no mappings and no remap step. The `jar` output is the
@@ -38,7 +44,7 @@ docker run --rm -u "$(id -u):$(id -g)" \
   The released jar's sha256 is pinned in **`mod/RELEASE.sha256`**, and `host/check.sh` checks the deployed copy
   against it.
 
-## Deploy (itzg `MODS`, proven on the workstation spike 2026-10-01)
+## Deploy (itzg `MODS`, proven on a spike 2026-10-01)
 
 The jar is not on Modrinth, so it stays **out of the `.mrpack`**:
 
@@ -85,10 +91,10 @@ deploy. With a new name, managed cleanup swaps the old copy out, so two copies o
 4. Change the `MODS` line in `docker-compose.yml` to the new name. `mod/test_check_extras.py` fails if the pin and
    compose disagree.
 
-**Deploy on asus-node:**
-1. Run `mkdir -p extras` as mm-mike, so Docker does not create it as root.
+**Deploy on the game host:**
+1. Run `mkdir -p extras` as the kit user, so Docker does not create it as root.
 2. Copy the jar into `extras/` under its versioned name.
-3. Bring the commit over with the usual git bundle.
+3. Bring the commit over (AGENTS.md "Updating a running server").
 4. Run `bash host/check.sh`; the extras line must PASS.
 5. Run `deploy/backup.sh`.
 6. Confirm with `rcon-cli list` that nobody is on, then apply it between play sessions with
@@ -141,4 +147,5 @@ jar is its git commit plus `mod/RELEASE.sha256`.
 | `JobsTest` | A blocked inbox job never stops the status beat (they are separate threads), and VeCommands' call site (pinned from its source) passes the beat as its own job |
 | `SymlinkTest` | Planted links for `events.jsonl`, `events.jsonl.1`, `inbox.offset(.tmp)`, `inbox.jsonl`, and linked `in/` and `out/`, plus a fifo inbox (with a 5 s bound, so a regression fails rather than hangs): all refused, the world stand-ins left byte-identical |
 
-`mod/test_check_extras.py` (pytest) covers the deploy check and its `host/check.sh` wiring, which it runs. The spike evidence is in the private repository's commit messages.
+`mod/test_check_extras.py` (pytest) covers the deploy check and its `host/check.sh` wiring, which it runs. The spike evidence is in the private repository's commit
+history, which is not part of this snapshot.

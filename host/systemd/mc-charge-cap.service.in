@@ -1,0 +1,16 @@
+[Unit]
+Description=Battery charge cap @MC_CHARGE_CAP@ percent (kit.toml battery.charge_cap), written at every boot
+Documentation=file://@MC_REPO@/AGENTS.md
+# Rendered only when kit.toml sets a cap (kit/render.py CONDITIONAL). asus-wmi resets the cap to 100 when it
+# attaches to the battery, so it is written at every boot; mc-charge-cap waits for the driver's sysfs file first.
+After=systemd-udev-trigger.service
+OnFailure=mc-alert@%n.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mc-charge-cap @MC_CHARGE_CAP@
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

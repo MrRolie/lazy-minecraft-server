@@ -1,6 +1,6 @@
 [Unit]
-Description=asus-node maintenance reboot (only if reboot-required and nobody is playing)
-Documentation=file:///home/mm-mike/minecraft-ai-host/AGENTS.md
+Description=@MC_HOST_NAME@ maintenance reboot (only if reboot-required and nobody is playing)
+Documentation=file://@MC_REPO@/AGENTS.md
 # Wait out an unattended-upgrade that is still running at 05:40.
 After=apt-daily-upgrade.service docker.service
 OnFailure=mc-alert@%n.service

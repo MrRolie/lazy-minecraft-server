@@ -1,4 +1,4 @@
-# asus-node: every docker-<id>.scope (runc makes one per container under the systemd cgroup driver).
+# @MC_HOST_NAME@: every docker-<id>.scope (runc makes one per container under the systemd cgroup driver).
 # At shutdown the scope is stopped IN PARALLEL with mc-server.service's `compose stop`: systemd SIGTERMs
 # every process in it at once and SIGKILLs after the scope's TimeoutStopSec, which defaults to 90 s.
 # 180 s (= mc-server's TimeoutStopSec) lets mc-server-runner's own 110 s STOP_DURATION finish the save.

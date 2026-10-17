@@ -1,44 +1,113 @@
 #!/usr/bin/env bash
-# Host maintenance for asus-node, as code. Run on asus-node from the repo checkout:
+# Host maintenance for the game host (kit.toml host.name), as code. Run on that host from the repo checkout:
 #
+#   python3 kit/render.py        (as the kit user, after any kit.toml change)
 #   sudo bash host/setup.sh      then      bash host/check.sh
+#   sudo bash host/setup.sh --stand-up     the same, plus step 14: arm mc-server.service + mc-backup.timer (KIT.md P10)
 #
+# Every instance value (user, paths, network, host name) comes from host/kit.env, which kit/render.py renders from
+# kit.toml, and the units come from host/rendered/systemd/ (rendered from host/systemd/*.in). setup.sh refuses
+# when either is missing or does not match kit.toml.
 # Idempotent: a second run reports every step "unchanged" and reloads/restarts nothing.
-# It installs (AGENTS.md "Host maintenance (asus-node)" has the why and how to undo each):
+# It installs (AGENTS.md "Host maintenance" has the why and how to undo each):
 #   1. never sleep        masked sleep targets + logind drop-in
-#   2. network            wired: static IP outside the router's DHCP pool (commit-confirm with rollback),
-#                         autoconnect forever, metric 100; Wi-Fi unblocked; Wi-Fi DHCP fallback (600)
-#   3. scripts + units    /usr/local/sbin/mc-*, /etc/systemd/system/mc-*, apt timer drop-ins
+#   2. network            kit.toml net.*: the wired connection autoconnects forever (metric 100); with
+#                         mode = "static" it gets a static IP outside the router's DHCP pool (commit-confirm with
+#                         rollback); dhcp (the default) leaves its address to the router. With a wired AND a Wi-Fi
+#                         connection the Wi-Fi is the DHCP fallback (600); a Wi-Fi-only laptop's Wi-Fi autoconnects
+#                         forever. Wi-Fi is unblocked only when kit.toml names a Wi-Fi connection
+#   3. scripts + units    /etc/mc-host/kit.env, /usr/local/sbin/mc-*, /etc/systemd/system/mc-*, apt timer drop-ins
 #   4. docker             live-restore (hot-reloaded; docker is never restarted under a running server)
 #   5. update window      unattended-upgrades also takes Tailscale (Docker blacklisted: manual upgrades only);
 #                         tailscale/snap auto-update moved into the window
 #   6. backups            system mc-backup units (timer left DISABLED until stand-up); user-unit copies removed
-#   7. alerts             /etc/mc-host/ for the Discord webhook
-#   8. ssh                key-only (refused if mm-mike has no authorized key)
+#   7. alerts             /etc/mc-host/ for the Discord webhook; installs one a kit staged (discord/bootstrap.py)
+#   8. ssh                key-only (refused if the kit user has no authorized key)
 #   9. timers             mc-netwatch.timer, mc-maint.timer and mc-heal.timer enabled now (mc-server + mc-backup
 #                         wait for stand-up)
 #  10. bridge mailbox     mc_data/mcve/{out,in} (the mod <-> Discord bridge files) and extras/ (the mod jar)
-#                         exist, owned by mm-mike; refused through any symlinked component
+#                         exist, owned by the kit user; refused through any symlinked component
 #  11. bridge fence       mc-bridge-fence.service enabled and its raw-table drops live (bridge: Internet only)
-# It never enables mc-server.service or mc-backup.timer and never touches the world.
+#  12. linger             loginctl enable-linger for the kit user
+#  13. charge cap         mc-charge-cap.service enabled (kit.toml battery.charge_cap) and run now; reports
+#                         "written", never "verified"; with no cap configured, a leftover unit is removed
+#  14. stand-up           ONLY with --stand-up: enable --now mc-server.service + mc-backup.timer, refused until the
+#                         world, its pack and a first backup exist, and refused when any earlier step aborted
+# Without --stand-up it never enables mc-server.service or mc-backup.timer, and it never touches the world.
 set -euo pipefail
 
-MC_USER=mm-mike
-MC_HOME=/home/mm-mike
-REPO="${MC_HOME}/minecraft-ai-host"
-WIRED="Wired connection 1"
-# Example values for a typical home LAN: set for your network. The static address must sit outside the
-# router's DHCP pool.
-WIRED_ADDR="192.168.1.5/24"
-WIRED_GW="192.168.1.1"
-WIRED_DNS="192.168.1.1 1.1.1.1"
-ROLLBACK_SECS=180
-# Example: set to your Wi-Fi connection's NetworkManager name.
-WIFI="HomeWiFi"
-UNIT_DIR=/etc/systemd/system
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# >>> kit config: the instance values, from host/kit.env (kit/render.py). host/test_host.py runs this block.
+KIT_ENV="${HOST_DIR}/kit.env"
+if [ ! -f "$KIT_ENV" ]; then
+  echo "refusing: ${KIT_ENV} is missing; render it first, as the kit user: python3 kit/render.py" >&2
+  exit 1
+fi
+# Sourced as root, so only render's own lines: KIT_ENV_LINE in kit/render.py (no $, `, \ or quote inside), for
+# only the keys render writes (kit_env_values; host/test_host.py pins this list), so never PATH, IFS or KIT_ENV.
+KIT_KEYS='MC_HOST_NAME|MC_USER|MC_HOME|MC_REPO|MC_UID|MC_GID|MC_TZ|MC_NET_MODE|MC_WIRED_CONN|MC_WIFI_CONN'
+KIT_KEYS+='|MC_WIRED_ADDR|MC_WIRED_GW|MC_WIRED_DNS|MC_MAINT_START|MC_TS_HOST_NAME|MC_SERVER_ADDRESS|MC_CHARGE_CAP'
+if grep -nvE '^(#.*|('"$KIT_KEYS"')="[^"\\$`]*")?$' "$KIT_ENV" >&2; then
+  echo "refusing: the line(s) above in ${KIT_ENV} are not KEY=\"value\"; re-render it: python3 kit/render.py" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$KIT_ENV"
+for k in MC_HOST_NAME MC_USER MC_HOME MC_REPO MC_NET_MODE MC_CHARGE_CAP; do
+  if [ -z "${!k:-}" ]; then
+    echo "refusing: ${KIT_ENV} has no ${k}; re-render it: python3 kit/render.py" >&2
+    exit 1
+  fi
+done
+# The network keys are present but may be empty: empty = not configured (kit.toml leaves the key out).
+for k in MC_WIRED_CONN MC_WIRED_ADDR MC_WIRED_GW MC_WIRED_DNS MC_WIFI_CONN; do
+  if [ -z "${!k+set}" ]; then
+    echo "refusing: ${KIT_ENV} has no ${k}; re-render it: python3 kit/render.py" >&2
+    exit 1
+  fi
+done
+# = kitconfig.net_problems, again here because this file is sourced as root and acted on.
+if [ -z "$MC_WIRED_CONN" ] && [ -z "$MC_WIFI_CONN" ]; then
+  echo "refusing: ${KIT_ENV} names no network connection (kit.toml net.wired_conn or net.wifi_conn)" >&2
+  exit 1
+fi
+case "$MC_NET_MODE" in
+  dhcp) ;;
+  static)
+    for k in MC_WIRED_CONN MC_WIRED_ADDR MC_WIRED_GW MC_WIRED_DNS; do
+      if [ -z "${!k}" ]; then
+        echo "refusing: ${KIT_ENV} has net mode static but no ${k}; re-render it: python3 kit/render.py" >&2
+        exit 1
+      fi
+    done
+    ;;
+  *)
+    echo "refusing: ${KIT_ENV} MC_NET_MODE=${MC_NET_MODE} (dhcp or static)" >&2
+    exit 1
+    ;;
+esac
+REPO="$MC_REPO"
+WIRED="$MC_WIRED_CONN"
+# A static address outside the router's DHCP pool (kit.toml net.static_addr), for routers that cannot reserve one.
+WIRED_ADDR="$MC_WIRED_ADDR"
+WIRED_GW="$MC_WIRED_GW"
+WIRED_DNS="$MC_WIRED_DNS"
+WIFI="$MC_WIFI_CONN"
+# <<< kit config
+STAND_UP=0
+case "${1:-}" in
+  "") ;;
+  --stand-up) STAND_UP=1 ;;
+  *) echo "usage: sudo bash host/setup.sh [--stand-up]" >&2; exit 2 ;;
+esac
+ROLLBACK_SECS=180
+UNIT_DIR=/etc/systemd/system
+LINGER_DIR=/var/lib/systemd/linger  # logind's record: a file per lingering user
+UNIT_SRC="${HOST_DIR}/rendered/systemd"
 # shellcheck source=host/lib/net.sh
 . "${HOST_DIR}/lib/net.sh"
+# shellcheck source=host/lib/standup.sh
+. "${HOST_DIR}/lib/standup.sh"
 
 step() { printf '\n== %s\n' "$*"; }
 log() { printf '   %s\n' "$*"; }
@@ -58,26 +127,35 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "run as root: sudo bash host/setup.sh" >&2
   exit 1
 fi
-if [ "$(hostname)" != "asus-node" ] && [ "${MC_HOST_FORCE:-0}" != 1 ]; then
-  echo "refusing: this is $(hostname), not asus-node (MC_HOST_FORCE=1 overrides)" >&2
+if [ "$(hostname)" != "$MC_HOST_NAME" ] && [ "${MC_HOST_FORCE:-0}" != 1 ]; then
+  echo "refusing: this is $(hostname), not ${MC_HOST_NAME} (kit.toml host.name; MC_HOST_FORCE=1 overrides)" >&2
   exit 1
 fi
-# The units hard-code ${REPO}; installing them from any other checkout would point them elsewhere.
+# The rendered units name ${REPO}; installing them from any other checkout would point them elsewhere.
 if [ "$(realpath "${HOST_DIR}/..")" != "$REPO" ]; then
-  echo "refusing: run from ${REPO} (this checkout is $(realpath "${HOST_DIR}/.."))" >&2
+  echo "refusing: run from ${REPO} (kit.toml host.repo; this checkout is $(realpath "${HOST_DIR}/.."))" >&2
+  exit 1
+fi
+# kit.env and the rendered units must be what kit.toml renders to now: a stale render would install old values.
+# -B: as root, an import would leave a root-owned kit/__pycache__ in the kit user's checkout.
+if ! stale="$(python3 -B "${HOST_DIR}/../kit/render.py" --check --host-only 2>&1)"; then
+  printf '%s\n' "$stale" >&2
+  echo "refusing: host/kit.env or host/rendered/ does not match kit.toml; as ${MC_USER}: python3 kit/render.py" >&2
   exit 1
 fi
 
 CHANGED=0
-# install_file SRC DST MODE: install only if content or mode differs. Sets CHANGED=1 if it wrote.
+# install_file SRC DST MODE [GROUP]: install root:GROUP (default root) only if content, mode or group differs.
+# Sets CHANGED=1 if it wrote.
 install_file() {
-  local src=$1 dst=$2 mode=$3
+  local src=$1 dst=$2 mode=$3 group=${4:-root}
   CHANGED=0
-  if [ -f "$dst" ] && cmp -s "$src" "$dst" && [ "$(stat -c %a "$dst")" = "$mode" ]; then
+  if [ -f "$dst" ] && cmp -s "$src" "$dst" && [ "$(stat -c %a "$dst")" = "$mode" ] \
+    && [ "$(stat -c %G "$dst")" = "$group" ]; then
     log "unchanged $dst"
     return 0
   fi
-  install -D -m "$mode" -o root -g root "$src" "$dst"
+  install -D -m "$mode" -o root -g "$group" "$src" "$dst"
   log "installed $dst"
   CHANGED=1
 }
@@ -105,6 +183,16 @@ nm_set() {
 }
 
 nm_exists() { nmcli -g connection.id connection show "$1" >/dev/null 2>&1; }
+
+# /etc/mc-host: root:MC_USER 750 (kit.env and the alert webhook; the kit user's scripts read them by group).
+etc_mc_host_dir() {
+  if [ "$(stat -c '%U:%G %a' /etc/mc-host 2>/dev/null || true)" = "root:${MC_USER} 750" ]; then
+    log "unchanged /etc/mc-host"
+  else
+    install -d -m 750 -o root -g "$MC_USER" /etc/mc-host
+    log "created /etc/mc-host (root:${MC_USER} 750)"
+  fi
+}
 
 # wired_static: move WIRED to WIRED_ADDR (manual), commit-confirm style. Unchanged if already there.
 wired_static() {
@@ -140,7 +228,7 @@ wired_static() {
       abort_step "static IP: probe broken, the gateway control ${WIRED_GW} shows no lladdr on ${dev} ('${control}'); nothing changed"
       return 0
     elif [ "$verdict" = in-use ]; then
-      abort_step "static IP: ${ip} is IN USE on the LAN (ping answered=${answered}, neighbour '${neigh}'); pick a free address outside the DHCP pool and set WIRED_ADDR"
+      abort_step "static IP: ${ip} is IN USE on the LAN (ping answered=${answered}, neighbour '${neigh}'); pick a free address outside the DHCP pool, set net.static_addr in kit.toml and re-render"
       return 0
     fi
     log "${ip} is free (no ping reply, neighbour '${neigh:-none}'); control ${WIRED_GW}: lladdr present"
@@ -203,72 +291,111 @@ if [ "$CHANGED" = 1 ]; then
 fi
 
 # ---- 2. resilient network ---------------------------------------------------------------------
-step "2. resilient network"
-if nm_exists "$WIRED"; then
+step "2. resilient network (kit.toml net.mode=${MC_NET_MODE}; wired '${WIRED}', Wi-Fi '${WIFI}')"
+if [ -z "$WIRED" ]; then
+  log "no wired connection in kit.toml (Wi-Fi-only laptop): wired settings skipped"
+elif nm_exists "$WIRED"; then
   nm_set "$WIRED" connection.autoconnect yes connection.autoconnect-retries 0 \
     connection.autoconnect-priority 100 ipv4.route-metric 100
 else
   warn "NetworkManager connection '${WIRED}' not found; wired settings skipped"
-  next "Wired connection '${WIRED}' is missing: check 'nmcli connection show' and fix WIRED in host/setup.sh + MC_WIRED_CONN in mc-netwatch"
+  next "Wired connection '${WIRED}' is missing: check 'nmcli connection show' and set net.wired_conn in kit.toml, re-render (python3 kit/render.py), then re-run setup"
 fi
 
-if rfkill -n -o TYPE,SOFT | awk '$1 == "wlan" && $2 == "blocked" { found = 1 } END { exit !found }'; then
-  rfkill unblock wifi  # Bluetooth stays blocked
-  log "rfkill: unblocked wifi"
-else
-  log "unchanged rfkill wifi (not blocked)"
-fi
-if [ "$(nmcli radio wifi)" != enabled ]; then
-  nmcli radio wifi on
-  log "nmcli: wifi radio on"
-else
-  log "unchanged wifi radio (enabled)"
-fi
-
-if nm_exists "$WIFI"; then
-  psk_flags="$(nmcli -g 802-11-wireless-security.psk-flags connection show "$WIFI")"
-  psk_flags="${psk_flags%% *}"
+# wifi_stored: 0 if the Wi-Fi password is stored system-wide (readable by NetworkManager at boot, with nobody
+# logged in), 1 if not. Sets wifi_evidence. Only a system-owned secret is readable here; never print it.
+wifi_stored() {
+  local flags perms stored=0
+  flags="$(nmcli -g 802-11-wireless-security.psk-flags connection show "$WIFI")"
+  flags="${flags%% *}"
   perms="$(nmcli -g connection.permissions connection show "$WIFI")"
-  psk_stored=0
-  # Only a system-owned secret is readable here; never print it.
-  if [ "$psk_flags" = 0 ] && [ -n "$(nmcli -s -g 802-11-wireless-security.psk connection show "$WIFI" 2>/dev/null)" ]; then
-    psk_stored=1
+  if [ "$flags" = 0 ] && [ -n "$(nmcli -s -g 802-11-wireless-security.psk connection show "$WIFI" 2>/dev/null)" ]; then
+    stored=1
   fi
-  if [ "$psk_flags" = 0 ] && [ -z "$perms" ] && [ "$psk_stored" = 1 ]; then
-    nm_set "$WIFI" connection.autoconnect yes connection.autoconnect-priority 10 ipv4.route-metric 600
-  else
-    warn "${WIFI}: password not stored system-wide (psk-flags=${psk_flags}, permissions='${perms}', psk stored=${psk_stored}); fallback NOT configured"
-    next "Wi-Fi fallback: store the ${WIFI} password system-wide, then re-run setup:
-       read -rs -p '${WIFI} password: ' PSK; echo
-       sudo nmcli connection modify ${WIFI} connection.permissions '' 802-11-wireless-security.psk-flags 0 802-11-wireless-security.psk \"\$PSK\"; unset PSK
+  wifi_evidence="psk-flags=${flags}, permissions='${perms}', psk stored=${stored}"
+  [ "$flags" = 0 ] && [ -z "$perms" ] && [ "$stored" = 1 ]
+}
+wifi_store_how="read -rs -p '${WIFI} password: ' PSK; echo
+       sudo nmcli connection modify '${WIFI}' connection.permissions '' 802-11-wireless-security.psk-flags 0 802-11-wireless-security.psk \"\$PSK\"; unset PSK
        sudo bash host/setup.sh"
-  fi
+
+if [ -z "$WIFI" ]; then
+  log "no Wi-Fi connection in kit.toml: Wi-Fi left as it is (no fallback)"
 else
-  warn "NetworkManager connection '${WIFI}' not found; no Wi-Fi fallback"
-  next "Wi-Fi fallback: no '${WIFI}' connection exists; create it with 'sudo nmcli device wifi connect ${WIFI} --ask', then re-run setup"
+  if rfkill -n -o TYPE,SOFT | awk '$1 == "wlan" && $2 == "blocked" { found = 1 } END { exit !found }'; then
+    rfkill unblock wifi  # Bluetooth stays blocked
+    log "rfkill: unblocked wifi"
+  else
+    log "unchanged rfkill wifi (not blocked)"
+  fi
+  if [ "$(nmcli radio wifi)" != enabled ]; then
+    nmcli radio wifi on
+    log "nmcli: wifi radio on"
+  else
+    log "unchanged wifi radio (enabled)"
+  fi
+fi
+
+if [ -z "$WIFI" ]; then
+  :
+elif [ -n "$WIRED" ]; then  # the Wi-Fi is the wired link's fallback
+  if nm_exists "$WIFI"; then
+    if wifi_stored; then
+      nm_set "$WIFI" connection.autoconnect yes connection.autoconnect-priority 10 ipv4.route-metric 600
+    else
+      warn "${WIFI}: password not stored system-wide (${wifi_evidence}); fallback NOT configured"
+      next "Wi-Fi fallback: store the ${WIFI} password system-wide, then re-run setup:
+       ${wifi_store_how}"
+    fi
+  else
+    warn "NetworkManager connection '${WIFI}' not found; no Wi-Fi fallback"
+    next "Wi-Fi fallback: no '${WIFI}' connection exists; create it with 'sudo nmcli device wifi connect ${WIFI} --ask', then re-run setup"
+  fi
+else  # a Wi-Fi-only laptop: the Wi-Fi is the one link, so it must come up at boot with nobody logged in
+  if ! nm_exists "$WIFI"; then
+    abort_step "Wi-Fi: no '${WIFI}' connection exists and it is this laptop's only link; create it with 'sudo nmcli device wifi connect <SSID> --ask', set net.wifi_conn in kit.toml, re-render, re-run setup"
+  elif ! wifi_stored; then
+    abort_step "Wi-Fi: ${WIFI} is this laptop's only link and its password is not stored system-wide (${wifi_evidence}), so it would not connect at boot before anyone logs in; store it, then re-run setup:
+       ${wifi_store_how}"
+  else
+    nm_set "$WIFI" connection.autoconnect yes connection.autoconnect-retries 0
+  fi
 fi
 
 # Last in step 2, so the Wi-Fi safety net above is already up during the static-IP commit window.
-if nm_exists "$WIRED"; then
-  wired_static
+if [ -n "$WIRED" ] && nm_exists "$WIRED"; then
+  if [ "$MC_NET_MODE" = static ]; then
+    wired_static
+  elif [ "$(nmcli -g ipv4.method connection show "$WIRED")" != auto ]; then
+    # dhcp: never change an address without the commit-confirm path; say how to go back instead.
+    abort_step "network: kit.toml net.mode is dhcp but '${WIRED}' has ipv4.method $(nmcli -g ipv4.method connection show "$WIRED"); nothing changed. Back to DHCP by hand (AGENTS.md 'Network' undo), or set net.mode = \"static\" with its address"
+  else
+    log "unchanged ${WIRED}: ipv4 auto (DHCP; kit.toml net.mode=dhcp)"
+  fi
 fi
 
 # ---- 3. scripts + units -----------------------------------------------------------------------
-step "3. scripts and units (/usr/local/sbin, ${UNIT_DIR})"
+step "3. scripts and units (/etc/mc-host/kit.env, /usr/local/sbin, ${UNIT_DIR})"
+# The root-owned copy of kit.env the host/bin scripts read (never the user-writable checkout's). It goes in BEFORE
+# the scripts: a timer firing between the two must not find a new script without its config.
+etc_mc_host_dir
+install_file "$KIT_ENV" /etc/mc-host/kit.env 640 "$MC_USER"
 for f in "${HOST_DIR}"/bin/mc-*; do
   install_file "$f" "/usr/local/sbin/$(basename "$f")" 755
 done
 units_changed=0
+cap_changed=0
 timers_to_restart=()
-for f in "${HOST_DIR}"/systemd/*.service "${HOST_DIR}"/systemd/*.timer; do
+for f in "${UNIT_SRC}"/*.service "${UNIT_SRC}"/*.timer; do
   name="$(basename "$f")"
   install_file "$f" "${UNIT_DIR}/${name}" 644
   if [ "$CHANGED" = 1 ]; then
     units_changed=1
     [[ "$name" == *.timer ]] && timers_to_restart+=("$name")
+    [ "$name" = mc-charge-cap.service ] && cap_changed=1
   fi
 done
-for d in "${HOST_DIR}"/systemd/*.d; do
+for d in "${UNIT_SRC}"/*.d; do
   unit="$(basename "$d" .d)"
   for f in "$d"/*.conf; do
     install_file "$f" "${UNIT_DIR}/${unit}.d/$(basename "$f")" 644
@@ -289,8 +416,10 @@ for t in "${timers_to_restart[@]}"; do
     log "restarted ${t} (schedule changed)"
   fi
 done
-log "mc-server.service installed, NOT enabled (production stand-up enables it)"
-next "At production stand-up: sudo systemctl enable --now mc-server.service mc-backup.timer"
+if [ "$STAND_UP" = 0 ]; then
+  log "mc-server.service installed, NOT enabled (production stand-up enables it)"
+  next "At production stand-up: sudo bash host/setup.sh --stand-up (enables mc-server.service + mc-backup.timer)"
+fi
 
 # ---- 4. docker live-restore -------------------------------------------------------------------
 step "4. docker live-restore"
@@ -385,11 +514,30 @@ log "mc-backup.timer: $(systemctl is-enabled mc-backup.timer 2>/dev/null || true
 
 # ---- 7. alerts --------------------------------------------------------------------------------
 step "7. alerts (/etc/mc-host/webhook)"
-if [ "$(stat -c '%U:%G %a' /etc/mc-host 2>/dev/null || true)" = "root:${MC_USER} 750" ]; then
-  log "unchanged /etc/mc-host"
-else
-  install -d -m 750 -o root -g "$MC_USER" /etc/mc-host
-  log "created /etc/mc-host (root:${MC_USER} 750)"
+etc_mc_host_dir
+# A kit stages the URL here (discord/bootstrap.py webhook --apply, as the kit user, mode 600): install it, then
+# remove the staged copy so the URL has one home. It is read AS THE KIT USER, never as root: a link planted in the
+# kit user's home must not make root copy a file only root can read into a file the kit user can.
+WEBHOOK_STAGED="${MC_HOME}/.config/mc-kit/webhook"
+WEBHOOK_URL_RE='^https://discord\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{1,100}$'
+if [ -e "$WEBHOOK_STAGED" ] || [ -L "$WEBHOOK_STAGED" ]; then
+  staged_url=""
+  if [ ! -L "$WEBHOOK_STAGED" ]; then
+    staged_url="$(runuser -u "$MC_USER" -- cat -- "$WEBHOOK_STAGED" 2>/dev/null || true)"
+  fi
+  if ! [[ $staged_url =~ $WEBHOOK_URL_RE ]]; then
+    abort_step "${WEBHOOK_STAGED} is a link, unreadable, or not one Discord webhook URL; nothing installed. Re-stage it: python3 discord/bootstrap.py webhook --apply"
+  else
+    if [ -f /etc/mc-host/webhook ] && [ "$(cat /etc/mc-host/webhook)" = "$staged_url" ]; then
+      log "unchanged /etc/mc-host/webhook (the staged URL is already installed)"
+    else
+      printf '%s\n' "$staged_url" | install -m 640 -o root -g "$MC_USER" /dev/stdin /etc/mc-host/webhook
+      log "installed /etc/mc-host/webhook from ${WEBHOOK_STAGED} (URL not shown)"
+    fi
+    runuser -u "$MC_USER" -- rm -f -- "$WEBHOOK_STAGED"
+    log "removed ${WEBHOOK_STAGED}"
+  fi
+  unset staged_url
 fi
 if [ -f /etc/mc-host/webhook ]; then
   if [ "$(stat -c '%U:%G %a' /etc/mc-host/webhook)" = "root:${MC_USER} 640" ]; then
@@ -401,9 +549,10 @@ if [ -f /etc/mc-host/webhook ]; then
   fi
 else
   warn "/etc/mc-host/webhook missing: alerts are logged to the journal only"
-  next "Alerts: create a Discord webhook (Channel settings > Integrations > Webhooks), then:
+  next "Alerts: on a kit, as ${MC_USER}: python3 discord/bootstrap.py webhook --apply, then re-run setup. Or by hand:
+       create a Discord webhook (Channel settings > Integrations > Webhooks), then:
        read -rs -p 'webhook URL: ' URL; echo; printf '%s\n' \"\$URL\" | sudo install -m 640 -o root -g ${MC_USER} /dev/stdin /etc/mc-host/webhook; unset URL
-       /usr/local/sbin/mc-alert 'test alert from asus-node'"
+       /usr/local/sbin/mc-alert 'test alert from ${MC_HOST_NAME}'"
 fi
 
 # ---- 8. ssh -----------------------------------------------------------------------------------
@@ -417,7 +566,7 @@ if cmp -s "${HOST_DIR}/conf/sshd-10-mc-host.conf" "$sshd_conf"; then
 elif ! grep -Ev '^[[:space:]]*(#|$)' "$auth_keys" 2>/dev/null \
   | grep -Eq '(^|[[:space:]])(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+)[[:space:]]+AAAA[0-9A-Za-z+/]'; then
   warn "REFUSED: ${auth_keys} holds no public key; disabling passwords now could lock you out"
-  next "SSH: add your key to ${auth_keys} (ssh-copy-id from the workstation), then re-run setup"
+  next "SSH: add your key to ${auth_keys} (ssh-copy-id from the machine you administer it from), then re-run setup"
 elif ! sshd -T 2>/dev/null | grep -qx 'pubkeyauthentication yes'; then
   warn "REFUSED: sshd has PubkeyAuthentication off; disabling passwords would lock you out"
 else
@@ -501,6 +650,66 @@ else
   systemctl enable mc-bridge-fence.service
   systemctl restart mc-bridge-fence.service  # no ExecStop: a restart never opens the fence, it re-applies
   log "enabled + applied mc-bridge-fence: $(/usr/local/sbin/mc-bridge-fence check)"
+fi
+
+# ---- 12. linger --------------------------------------------------------------------------------
+step "12. linger (${MC_USER}'s user manager runs without a login)"
+if [ -e "${LINGER_DIR}/${MC_USER}" ]; then
+  log "unchanged linger (on)"
+else
+  loginctl enable-linger "$MC_USER"
+  log "loginctl enable-linger ${MC_USER}"
+fi
+
+# ---- 13. charge cap ---------------------------------------------------------------------------
+step "13. battery charge cap (kit.toml battery.charge_cap=${MC_CHARGE_CAP})"
+# The unit is rendered only when a cap is set (kit/render.py CONDITIONAL), and step 3 installed it from there.
+if [ "$MC_CHARGE_CAP" = none ]; then
+  if [ -e "${UNIT_DIR}/mc-charge-cap.service" ]; then
+    systemctl disable --now mc-charge-cap.service || true
+    rm -f "${UNIT_DIR}/mc-charge-cap.service"
+    systemctl daemon-reload
+    log "removed mc-charge-cap.service (no cap in kit.toml; the driver's own default applies from the next boot)"
+  else
+    log "unchanged: no charge cap configured"
+  fi
+elif [ ! -f "${UNIT_SRC}/mc-charge-cap.service" ]; then
+  abort_step "charge cap ${MC_CHARGE_CAP} is set but ${UNIT_SRC}/mc-charge-cap.service was not rendered; python3 kit/render.py"
+elif systemctl is-enabled --quiet mc-charge-cap.service && systemctl is-active --quiet mc-charge-cap.service \
+  && [ "$cap_changed" = 0 ]; then
+  log "unchanged mc-charge-cap.service (enabled; written this boot)"
+else
+  systemctl enable mc-charge-cap.service
+  # restart, not start: a changed cap must be written now, and a oneshot with RemainAfterExit stays "active".
+  if systemctl restart mc-charge-cap.service; then
+    log "mc-charge-cap: $(journalctl -u mc-charge-cap.service -b -n 5 -o cat --no-pager 2>/dev/null | grep -E '^written|FAILED' | tr '\n' ' ')"
+    log "the cap is WRITTEN, not verified: drivers round it, and some (asus-wmi) read back their own cached copy"
+  else
+    abort_step "mc-charge-cap.service failed (journalctl -u mc-charge-cap.service): no charge_control_end_threshold, or the driver refused ${MC_CHARGE_CAP}"
+  fi
+fi
+
+# ---- 14. stand-up (--stand-up only) -----------------------------------------------------------
+if [ "$STAND_UP" = 1 ]; then
+  step "14. stand-up: enable --now mc-server.service + mc-backup.timer"
+  standup_refusal="$(standup_refusal "$REPO")"
+  # An earlier abort (a static IP not confirmed, a Wi-Fi that cannot connect at boot, a symlinked mailbox, a failed
+  # charge cap) leaves the host unfit to run unattended: production is never armed on top of it.
+  if [ "$ABORTED" = 1 ]; then
+    abort_step "stand-up refused: an earlier step aborted (above); fix it, then re-run with --stand-up"
+  elif [ -n "$standup_refusal" ]; then
+    abort_step "stand-up refused: ${standup_refusal}"
+  else
+    for u in mc-server.service mc-backup.timer; do
+      if systemctl is-enabled --quiet "$u" && systemctl is-active --quiet "$u"; then
+        log "unchanged ${u} (enabled, active)"
+      else
+        systemctl enable --now "$u"
+        log "enabled + started ${u}"
+      fi
+    done
+    next "Stand-up armed: do the supervised reboot (KIT.md P10), then bash host/check.sh"
+  fi
 fi
 
 # ---- next steps -------------------------------------------------------------------------------

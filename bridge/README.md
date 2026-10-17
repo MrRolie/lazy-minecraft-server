@@ -29,13 +29,13 @@ boundary is the mod: the inbox can only broadcast text and add whitelist names.
     (25565 included), the LAN and the tailnet. DOCKER-USER would not: on a Tailscale host, FORWARD hits
     `ts-forward` first, which ACCEPTs anything bound for the tailnet.
   - **Why:** without it, the bridge could relay a stranger from the Internet to the game port. Together with
-    `/whitelist`, that would bypass the Tailscale-only rule. Proven on the workstation (rv2: review round 2), and fixed and re-proven:
+    `/whitelist`, that would bypass the Tailscale-only rule. Proven on the dev machine (rv2), and fixed and re-proven:
     the gateway, LAN IP and tailnet IP all time out on the published port, while `discord.com:443` connects.
   - **Every start path is fenced.**
     - bridge.py refuses, with the FATAL hold, unless the fence's stamp `/run/mc-host/bridge-fence.ok`
       exists. The host's `/run/mc-host` is mounted read-only.
     - That covers mc-server.service, the restart policy (a crash, or dockerd restarting it after an unclean
-      stop), and a hand-run `up`. Proven live on the workstation (rv3).
+      stop), and a hand-run `up`. Proven live on the dev machine (rv3).
     - `mc-server.service` also checks the stamp, in `host/bin/mc-bridge-up`, and mc-alerts if the bridge
       doesn't start.
     - The fence is deliberately not a `Requires=` of docker: a fence failure must never block minecraft.
@@ -48,7 +48,7 @@ boundary is the mod: the inbox can only broadcast text and add whitelist names.
   - read-only root fs
   - root only in the entrypoint, long enough to hand a root-owned `in/` to 1000
 - **Disk, the accepted residual risk:** `mc_data/mcve/in` sits on the world's filesystem, and a compromised
-  bridge can append to `inbox.jsonl` without limit. That is an accepted risk (the owner's decision, rv2), and
+  bridge can append to `inbox.jsonl` without limit. That is accepted (the owner's decision, rv2), and
   `host/check.sh` alarms on it:
   - WARN when `in/` is over 50 MiB
   - FAIL when it is over 500 MiB, or when the `mc_data` filesystem has under 5 GiB free
@@ -68,7 +68,7 @@ boundary is the mod: the inbox can only broadcast text and add whitelist names.
 
 ## The bridge bot (least capability)
 
-The bridge has **its own bot**. It never uses the admin bot (Claudius) token that `discord/sync.py` uses (`discord/.env`, workstation only).
+The bridge has **its own bot**. It never uses the admin bot's token (`discord/.env`).
 
 **Developer Portal** (New Application, name it e.g. "Vanilla Extended Bridge"):
 - **Installation:**
@@ -77,7 +77,7 @@ The bridge has **its own bot**. It never uses the admin bot (Claudius) token tha
 - **Bot:**
   - Public Bot **off**; Requires OAuth2 Code Grant **off**
   - Privileged Gateway Intents: **Message Content on**; Presence and Server Members **off**
-  - Reset Token, and copy it straight into `.env.bridge` on asus-node (below). It never goes in git, chat or
+  - Reset Token, and copy it straight into `.env.bridge` on the game host (below). It never goes in git, chat or
     logs.
 
 **Permissions**, integer **`2147568640`**:
@@ -104,28 +104,29 @@ The bridge has **its own bot**. It never uses the admin bot (Claudius) token tha
 https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications.commands&permissions=2147568640
 ```
 
-Append `&guild_id=<GUILD_ID>&disable_guild_select=true` to pin it to the friend guild.
+Append `&guild_id=<kit.toml discord.guild_id>&disable_guild_select=true` to pin it to the friend guild
+(`discord/bootstrap.py discover` prints this link for a kit guild).
 
 **`#ops-log` is private** (the ADMIN category denies View to @everyone). A non-admin bot only sees it through an
 overwrite, and overwrites are code, so a hand edit would be reverted by the next sync. After inviting the bot:
 
 1. Copy the bot's user id: right-click the bot in the member list → Copy User ID (Developer Mode). For a bot it
    equals the Application ID.
-2. Put it in `discord/layout.toml`, ADMIN: `extra_bots = ["<id>"]`.
-3. Dry run `python3 discord/sync.py` on the workstation. Expect exactly two patches, ADMIN and ops-log
+2. Put it in `kit.toml` `discord.bridge_bot_id` (layout.toml's ADMIN `extra_bots` names `"bridge"`).
+3. Dry run `python3 discord/sync.py` where its admin token is. Expect exactly two patches, ADMIN and ops-log
    `permission_overwrites`. Then `--apply`, then a dry run showing `0 actions`.
 
 Until then, the bridge refuses to start: `#ops-log: bot lacks view_channel, send_messages (add its user id to
 ADMIN extra_bots, then sync)`.
 
-## Deploy (asus-node, from `~/minecraft-ai-host`)
+## Deploy (on the game host, from the repo's working copy)
 
 This is a server-side change, so `deploy/backup.sh` comes first. Do it between play sessions (`rcon-cli list`).
 
-1. Bring the code over by git bundle (AGENTS.md "Host").
+1. Bring the code over (AGENTS.md "Updating a running server").
 2. `cp .env.bridge.example .env.bridge && chmod 600 .env.bridge`. Fill in `DISCORD_BRIDGE_TOKEN`.
 3. `sudo bash host/setup.sh`.
-   - Step 10 creates `mc_data/mcve/out`, `mc_data/mcve/in` and `extras/` as mm-mike. It refuses, creating
+   - Step 10 creates `mc_data/mcve/out`, `mc_data/mcve/in` and `extras/` as the kit user. It refuses, creating
      nothing, if any part of the path is a symlink.
    - Step 11 enables `mc-bridge-fence.service` and applies the fence.
 
@@ -142,7 +143,7 @@ This is a server-side change, so `deploy/backup.sh` comes first. Do it between p
 7. **After a bridge code change:** `docker compose build bridge && docker compose up -d --no-build bridge`.
 
 **Never a bare `docker compose up -d`.** If the bridge image is missing and can't be built, it aborts every
-service, minecraft included (proven on the workstation). Start minecraft alone, then the bridge.
+service, minecraft included (proven on the dev machine). Start minecraft alone, then the bridge.
 
 `mc_data/mcve/{out,in}` are created by `host/setup.sh` and `deploy/world.sh init`. If Docker created them
 anyway, they would be root-owned:

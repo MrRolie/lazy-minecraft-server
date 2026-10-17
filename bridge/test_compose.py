@@ -40,7 +40,7 @@ def compose_config(tmp_path, bridge_env=True):
 
 @pytest.fixture
 def tmp_path():
-    """A scratch dir under the repo, not /tmp: snap Docker (the workstation) can't see /tmp or hidden dirs (AGENTS.md)."""
+    """A scratch dir under the repo, not /tmp: snap Docker can't see /tmp or hidden dirs (AGENTS.md)."""
     d = Path(tempfile.mkdtemp(prefix="test-compose-", dir=REPO))
     yield d
     shutil.rmtree(d)
@@ -117,7 +117,7 @@ def test_minecraft_stop_budget_is_untouched(cfg):
 
 def test_an_oom_exits_the_jvm_and_never_dumps_the_heap(cfg):
     """An OOM'd JVM hung for 2 h with `restart` never firing (2026-10-01): it must exit so Docker restarts it.
-    JVM_XX_OPTS appends to the Aikar flags (seen in `docker top`, workstation spike 2026-10-02); a heap dump of 8 GB would
+    JVM_XX_OPTS appends to the Aikar flags (seen in `docker top`, spike 2026-10-02); a heap dump of 8 GB would
     land on the world's disk."""
     env = cfg["services"]["minecraft"]["environment"]
     assert env["JVM_XX_OPTS"] == "-XX:+ExitOnOutOfMemoryError"

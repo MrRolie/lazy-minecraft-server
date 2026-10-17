@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# mc-charge-cap: write the battery charge cap (kit.toml battery.charge_cap) to every battery that has the kernel's
+# charge_control_end_threshold. Run at every boot by mc-charge-cap.service (rendered only when kit.toml sets a cap).
+#
+# WHY every boot: asus-wmi writes 100 when it attaches to the battery, so a cap set once is gone after the next
+# boot. The file only exists once the driver has attached, so this waits for it (up to MC_CHARGE_CAP_WAIT seconds)
+# and then writes: the driver's own reset has already happened.
+#
+# It reports "written", never "verified". The ABI says drivers round to the nearest value they support (LG: only 80
+# or 100), and asus-wmi's readback is its own cached copy of what was written, not the hardware's state. So nothing
+# here reads the value back as evidence.
+#
+# Usage: mc-charge-cap <1-100>        (root; MC_POWER_SUPPLY overrides /sys/class/power_supply for tests)
+# Exit: 0 written to every threshold found; 1 none found, or a write failed (OnFailure= alerts); 2 usage.
+set -uo pipefail
+
+cap="${1:-}"
+if ! [[ "$cap" =~ ^[1-9][0-9]?$|^100$ ]]; then
+  echo "usage: mc-charge-cap <1-100> (got '${cap}')" >&2
+  exit 2
+fi
+supply="${MC_POWER_SUPPLY:-/sys/class/power_supply}"
+wait_s="${MC_CHARGE_CAP_WAIT:-60}"
+
+found=()
+for _ in $(seq 0 "$wait_s"); do
+  found=()
+  for f in "$supply"/*/charge_control_end_threshold; do
+    [ -e "$f" ] && found+=("$f")
+  done
+  [ ${#found[@]} -gt 0 ] && break
+  sleep 1
+done
+if [ ${#found[@]} -eq 0 ]; then
+  echo "mc-charge-cap: no ${supply}/*/charge_control_end_threshold after ${wait_s} s: cap ${cap} NOT applied" \
+    "(this hardware or kernel has no charge cap; set battery.charge_cap = \"none\" in kit.toml if that is so)" >&2
+  exit 1
+fi
+rc=0
+for f in "${found[@]}"; do
+  if printf '%s\n' "$cap" >"$f" 2>/dev/null; then
+    echo "written ${cap} to ${f} (not verified: the driver may round it, and its readback is its own copy)"
+  else
+    echo "write FAILED: ${cap} to ${f}" >&2
+    rc=1
+  fi
+done
+exit "$rc"

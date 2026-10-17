@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""mc-heal: restart a hung Minecraft server (mc-heal.timer, every 2 min from boot +10 min; runs as mm-mike).
+"""mc-heal: restart a hung Minecraft server (mc-heal.timer, every 2 min from boot +10 min; runs as the kit user).
 
     mc-heal           one check + at most one heal
     mc-heal --status  print the heal state as INFO/WARN lines (read-only; host/check.sh shows them)
@@ -30,8 +30,9 @@ or a new container start, begins a new streak; a good probe ends it. The heal:
 At most 2 heals per 6 h. Past that: one alert per streak, "mc-heal: cap reached, not restarting".
 State: /var/lib/mc-heal/state.json (StateDirectory); a file of the wrong shape is replaced by an empty one.
 
-MC_REPO and MC_COMPOSE_PROJECT (and MC_HEAL_STATE, MC_HEAL_ARCHIVE) exist for tests and rehearsal on a spike
-compose project only; mc-heal.service sets none of them.
+The repo and the kit user's home come from /etc/mc-host/kit.env (kit_value). MC_REPO and MC_COMPOSE_PROJECT (and
+MC_HEAL_STATE, MC_HEAL_ARCHIVE, MC_HOME, MC_KIT_ENV) exist for tests and rehearsal on a spike compose project
+only; mc-heal.service sets none of them.
 """
 import argparse
 import calendar
@@ -43,13 +44,36 @@ import subprocess
 import sys
 import time
 
-REPO = os.environ.get("MC_REPO", "/home/mm-mike/minecraft-ai-host")
+REPO = None     # main(): kit_value("MC_REPO")
 PROJECT = os.environ.get("MC_COMPOSE_PROJECT", "minecraft-ai-host")  # compose `name:`
 STATE_FILE = os.environ.get("MC_HEAL_STATE", "/var/lib/mc-heal/state.json")
-ARCHIVE = os.environ.get("MC_HEAL_ARCHIVE", "/home/mm-mike/archive/heal")
+ARCHIVE = os.environ.get("MC_HEAL_ARCHIVE")  # None: main() uses <kit MC_HOME>/archive/heal
 MAINT_FLAG = "maintenance"  # in REPO; = MAINT_FLAG in deploy/world.sh (host/test_host.py pins it)
 ALERT = "/usr/local/sbin/mc-alert"
 BUSY_STATES = {"active", "activating", "reloading", "deactivating"}  # a running oneshot reads `activating`
+
+# >>> kit_value: one copy in each of mc-heal, mc-maint and mc-netwatch, byte-identical (host/test_host.py pins it)
+KIT_ENV_LINE = re.compile(r'([A-Z][A-Z0-9_]*)="([^"\\$`\n]*)"')  # = kit/render.py KIT_ENV_LINE
+
+
+def kit_value(key):
+    """An instance value: $KEY if set (tests, rehearsal on a spike), else KEY in the root-owned copy of host/kit.env
+    that setup.sh installs ($MC_KIT_ENV, default /etc/mc-host/kit.env). Never a default in code: exits if neither
+    has it, so the unit fails and mc-alert@ says so."""
+    if os.environ.get(key):
+        return os.environ[key]
+    path = os.environ.get("MC_KIT_ENV", "/etc/mc-host/kit.env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh.read().splitlines():
+                m = KIT_ENV_LINE.fullmatch(line)
+                if m and m.group(1) == key:
+                    return m.group(2)
+    except OSError as exc:
+        sys.exit(f"{os.path.basename(sys.argv[0])}: cannot read kit.env at {path} ({exc.strerror}): sudo bash host/setup.sh")
+    sys.exit(f"{os.path.basename(sys.argv[0])}: kit.env at {path} has no {key}: python3 kit/render.py, then setup.sh")
+# <<< kit_value
+
 
 MIN = 60
 RCON_TIMEOUT = 30
@@ -366,12 +390,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Restart a hung Minecraft server.")
     ap.add_argument("--status", action="store_true", help="print the heal state only")
     args = ap.parse_args(argv)
+    global REPO, ARCHIVE
+    REPO = REPO or kit_value("MC_REPO")  # first: the maintenance flag lives in REPO, so nothing is judged without it
+    ARCHIVE = ARCHIVE or os.path.join(kit_value("MC_HOME"), "archive", "heal")
     if args.status:
         for level, text in status_lines(time.time(), load_state(), read_flag()):
             print(f"{level}\t{text}")
         return 0
     if os.geteuid() == 0:
-        log("refusing to run as root: mc-heal.service runs it as mm-mike (compose and the state are mm-mike's)")
+        log("refusing to run as root: mc-heal.service runs it as the kit user (compose and the state are theirs)")
         return 2
     return check(time.time())
 

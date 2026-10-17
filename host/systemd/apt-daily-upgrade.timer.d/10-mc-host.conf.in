@@ -1,4 +1,4 @@
-# asus-node maintenance window: unattended-upgrades at 05:00 sharp; mc-maint reboots at 05:40 if needed.
+# @MC_HOST_NAME@ maintenance window: unattended-upgrades at 05:00 sharp; mc-maint reboots at 05:40 if needed.
 # The empty OnCalendar= clears the stock 6:00 schedule; OnCalendar= is additive otherwise.
 [Timer]
 OnCalendar=

@@ -1,9 +1,13 @@
 """Tests for the host-maintenance decision logic (mc-netwatch, mc-maint, mc-alert) and the wiring
 between setup.sh, check.sh and the files they install. Run: uv run --with pytest pytest host/
 """
+import grp
+import gzip
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -20,6 +24,32 @@ T0 = 1_800_000_000.0  # an arbitrary wall-clock origin
 
 # Loading host/bin/* must not drop a __pycache__ there: setup.sh installs what is in bin/.
 sys.dont_write_bytecode = True
+
+# The instance values are a made-up kit instance's (kit/fixtures/example.toml), rendered by kit/render.py. The gate
+# that pins asus-node's own values reads its record (kit/fixtures/asus-node.toml) and skips where a copy dropped it
+# (kit/INSTANCE-PATHS).
+sys.path.insert(0, str(HOST.parent / "kit"))  # kit/ only: the repo root would shadow discord.py with discord/
+import instance  # noqa: E402  (kit/instance.py: part of a record raises, so a damaged live tree never skips)
+import kitconfig  # noqa: E402
+import render as kitrender  # noqa: E402
+
+EXAMPLE = HOST.parent / "kit" / "fixtures" / "example.toml"
+FIXTURE = HOST.parent / "kit" / "fixtures" / "asus-node.toml"
+NO_RECORD = instance.NO_RECORD
+RECORD = instance.record()
+KIT = kitrender.kit_env_values(kitconfig.load(EXAMPLE))
+
+
+@pytest.fixture(autouse=True)
+def _kit_env(tmp_path_factory, monkeypatch):
+    """host/bin's kit_value() reads the fixture's kit.env, never /etc/mc-host/kit.env or a stray $MC_* variable."""
+    f = tmp_path_factory.getbasetemp() / "fixture-kit.env"
+    if not f.exists():
+        f.write_text(kitrender.kit_env_text(KIT))
+    monkeypatch.setenv("MC_KIT_ENV", str(f))
+    for k in KIT:
+        monkeypatch.delenv(k, raising=False)
+    return f
 
 
 def load(name):
@@ -71,13 +101,13 @@ def test_tailscale_online_only_on_literal_true():
 
 def test_default_gateway_takes_lowest_metric():
     routes = [
-        {"dst": "default", "gateway": "192.168.1.1", "dev": "wlp2s0", "metric": 600},
-        {"dst": "default", "gateway": "192.168.1.254", "dev": "enx001122334455", "metric": 100},
+        {"dst": "default", "gateway": "192.0.2.1", "dev": "wlp2s0", "metric": 600},
+        {"dst": "default", "gateway": "192.0.2.254", "dev": "enx02000000beef", "metric": 100},
     ]
-    assert nw.default_gateway(json.dumps(routes)) == "192.168.1.254"
+    assert nw.default_gateway(json.dumps(routes)) == "192.0.2.254"
     # NM's connectivity penalty (+20000) hands the default to Wi-Fi
     routes[1]["metric"] = 20100
-    assert nw.default_gateway(json.dumps(routes)) == "192.168.1.1"
+    assert nw.default_gateway(json.dumps(routes)) == "192.0.2.1"
 
 
 def test_default_gateway_none_when_no_route():
@@ -511,15 +541,15 @@ def test_maint_dry_run_never_acts(monkeypatch, tmp_path):
 
 def test_unit_failure_message_fits_and_keeps_newest_lines():
     journal = "\n".join(f"line {i} " + "x" * 80 for i in range(200))
-    msg = al.format_unit_failure("mc-backup.service", "asus-node", journal)
+    msg = al.format_unit_failure("mc-backup.service", "kit-box", journal)
     assert len(msg) <= al.LIMIT
-    assert msg.startswith("**mc-backup.service failed on asus-node**")
+    assert msg.startswith("**mc-backup.service failed on kit-box**")
     assert "line 199 " in msg and "line 0 " not in msg
     assert msg.endswith("```")
 
 
 def test_unit_failure_message_without_journal():
-    assert al.format_unit_failure("mc-maint.service", "asus-node", "") == "**mc-maint.service failed on asus-node**"
+    assert al.format_unit_failure("mc-maint.service", "kit-box", "") == "**mc-maint.service failed on kit-box**"
 
 
 def test_unit_failure_message_with_one_huge_line_still_fits():
@@ -575,30 +605,31 @@ def test_alert_exits_zero_when_post_fails(monkeypatch):
 
 # ---- wiring: what setup.sh installs is what check.sh checks ---------------------------------
 
-SYSTEMD = HOST / "systemd"
+SYSTEMD = HOST / "systemd"  # the .in templates; setup.sh installs host/rendered/systemd (kit/render.py)
 
 
 def unit_text(name):
-    return (SYSTEMD / name).read_text()
+    """A unit as rendered for the example config."""
+    return kitrender.render_template((SYSTEMD / f"{name}.in").read_text(), KIT, name)
 
 
 def test_every_exec_path_is_installed_by_setup():
     installed = {f"/usr/local/sbin/{p.name}" for p in (HOST / "bin").glob("mc-*")}
-    for unit in SYSTEMD.glob("*.service"):
-        for path in re.findall(r"^Exec\w+=(/usr/local/sbin/\S+)", unit.read_text(), re.M):
+    for unit in SYSTEMD.glob("*.service.in"):
+        for path in re.findall(r"^Exec\w+=(/usr/local/sbin/\S+)", unit_text(unit.name[:-3]), re.M):
             assert path in installed, f"{unit.name} runs {path}, which setup.sh does not install"
 
 
 @pytest.mark.parametrize("unit", ["mc-backup.service", "mc-maint.service", "mc-server.service", "mc-netwatch.service",
                                   "mc-heal.service",
-                                  "mc-bridge-fence.service"])
+                                  "mc-bridge-fence.service", "mc-charge-cap.service"])
 def test_on_failure_alert_on(unit):
     assert "OnFailure=mc-alert@%n.service" in unit_text(unit)
 
 
 def test_mc_server_unit_contract():
     t = unit_text("mc-server.service")
-    for line in ["User=mm-mike", "WorkingDirectory=/home/mm-mike/minecraft-ai-host", "Type=oneshot",
+    for line in [f"User={KIT['MC_USER']}", f"WorkingDirectory={KIT['MC_REPO']}", "Type=oneshot",
                  "RemainAfterExit=yes", "After=docker.service network-online.target",
                  "ExecStart=/usr/bin/docker compose up -d minecraft",
                  "ExecStartPost=-/usr/local/sbin/mc-bridge-up",
@@ -687,15 +718,16 @@ def test_bridge_fence_print_lists_every_non_public_range():
     for must in ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]:
         assert ipaddress.ip_network(must) in nets, must
     # the host's LAN, the tailnet and the docker networks all fall inside a dropped range
-    for addr in ["192.168.1.5", "100.101.102.103", "172.17.0.1", conf["subnet"].split("/")[0]]:
+    lan = KIT["MC_WIRED_ADDR"].split("/")[0]
+    for addr in [lan, "100.64.0.1", "100.127.255.254", "172.17.0.1", conf["subnet"].split("/")[0]]:
         assert any(ipaddress.ip_address(addr) in n for n in nets), addr
     assert conf["stamp"] == "/run/mc-host/bridge-fence.ok"
     assert (HOST / "check.sh").read_text().count("mc-bridge-fence check") == 1
 
 
-def test_backup_is_a_system_unit_as_mm_mike():
+def test_backup_is_a_system_unit_as_the_kit_user():
     t = unit_text("mc-backup.service")
-    assert "User=mm-mike" in t and "%h" not in t
+    assert f"User={KIT['MC_USER']}" in t and "%h" not in t
     assert "OnCalendar=*-*-* 04:00:00" in unit_text("mc-backup.timer")
     assert "Persistent=true" in unit_text("mc-backup.timer")
     assert not (HOST.parent / "deploy" / "mc-backup.service").exists()
@@ -714,7 +746,7 @@ def test_netwatch_timer_schedule():
 
 @pytest.mark.parametrize("timer,at", [("apt-daily.timer", "04:30:00"), ("apt-daily-upgrade.timer", "05:00:00")])
 def test_apt_dropins_reset_then_set_calendar(timer, at):
-    lines = [ln for ln in (SYSTEMD / f"{timer}.d" / "10-mc-host.conf").read_text().splitlines()
+    lines = [ln for ln in unit_text(f"{timer}.d/10-mc-host.conf").splitlines()
              if ln and not ln.startswith("#")]
     cal = [ln for ln in lines if ln.startswith("OnCalendar=")]
     assert cal == ["OnCalendar=", f"OnCalendar=*-*-* {at}"]  # empty first: OnCalendar= is additive
@@ -791,7 +823,7 @@ def test_blacklist_stops_every_docker_package_and_nothing_else():
 # ---- wired static IP: pure pieces (host/lib/net.sh) and the rollback round trip -------------
 
 NET_LIB = HOST / "lib" / "net.sh"
-TARGET = ("192.168.1.5/24", "192.168.1.1", "192.168.1.1 1.1.1.1")
+TARGET = ("192.0.2.5/24", "192.0.2.1", "192.0.2.1 1.1.1.1")
 
 
 def sh(script, *args):
@@ -802,9 +834,9 @@ def sh(script, *args):
 
 
 @pytest.mark.parametrize("raw,want", [
-    ("192.168.1.1,1.1.1.1", "192.168.1.1 1.1.1.1"),  # nmcli -g form
-    ("192.168.1.1 1.1.1.1", "192.168.1.1 1.1.1.1"),
-    ("  192.168.1.1 ,  1.1.1.1 ", "192.168.1.1 1.1.1.1"),
+    ("192.0.2.1,1.1.1.1", "192.0.2.1 1.1.1.1"),  # nmcli -g form
+    ("192.0.2.1 1.1.1.1", "192.0.2.1 1.1.1.1"),
+    ("  192.0.2.1 ,  1.1.1.1 ", "192.0.2.1 1.1.1.1"),
     ("", ""),
 ])
 def test_norm_list(raw, want):
@@ -812,33 +844,33 @@ def test_norm_list(raw, want):
 
 
 @pytest.mark.parametrize("method,addrs,gw,dns,at_target", [
-    ("manual", "192.168.1.5/24", "192.168.1.1", "192.168.1.1,1.1.1.1", True),  # applied by hand, nmcli -g form
-    ("manual", "192.168.1.5/24", "192.168.1.1", "192.168.1.1 1.1.1.1", True),
+    ("manual", "192.0.2.5/24", "192.0.2.1", "192.0.2.1,1.1.1.1", True),  # applied by hand, nmcli -g form
+    ("manual", "192.0.2.5/24", "192.0.2.1", "192.0.2.1 1.1.1.1", True),
     ("auto", "", "", "", False),  # today: DHCP
-    ("auto", "192.168.1.5/24", "192.168.1.1", "192.168.1.1,1.1.1.1", False),  # extra address on DHCP
-    ("manual", "192.168.1.5/24", "192.168.1.1", "1.1.1.1,192.168.1.1", False),  # DNS order matters
-    ("manual", "192.168.1.50/24", "192.168.1.1", "192.168.1.1,1.1.1.1", False),
-    ("manual", "192.168.1.5/24", "", "192.168.1.1,1.1.1.1", False),
-    ("manual", "192.168.1.5/24,192.168.1.6/24", "192.168.1.1", "192.168.1.1,1.1.1.1", False),
+    ("auto", "192.0.2.5/24", "192.0.2.1", "192.0.2.1,1.1.1.1", False),  # extra address on DHCP
+    ("manual", "192.0.2.5/24", "192.0.2.1", "1.1.1.1,192.0.2.1", False),  # DNS order matters
+    ("manual", "192.0.2.50/24", "192.0.2.1", "192.0.2.1,1.1.1.1", False),
+    ("manual", "192.0.2.5/24", "", "192.0.2.1,1.1.1.1", False),
+    ("manual", "192.0.2.5/24,192.0.2.6/24", "192.0.2.1", "192.0.2.1,1.1.1.1", False),
 ])
 def test_wired_at_target(method, addrs, gw, dns, at_target):
     rc, _ = sh('wired_at_target "$@"', method, addrs, gw, dns, *TARGET)
     assert (rc == 0) == at_target
 
 
-GW_OK = "192.168.1.1 lladdr 02:00:00:00:00:01 REACHABLE"
+GW_OK = "192.0.2.1 lladdr 02:00:00:00:00:01 REACHABLE"
 
 
 @pytest.mark.parametrize("control,answered,target,verdict", [
-    (GW_OK, "0", "192.168.1.5 FAILED", "free"),
-    (GW_OK, "0", "192.168.1.5 INCOMPLETE", "free"),
+    (GW_OK, "0", "192.0.2.5 FAILED", "free"),
+    (GW_OK, "0", "192.0.2.5 INCOMPLETE", "free"),
     (GW_OK, "0", "", "free"),
     (GW_OK, "1", "", "in-use"),  # answers ping
-    (GW_OK, "0", "192.168.1.5 lladdr aa:bb:cc:dd:ee:ff REACHABLE", "in-use"),  # drops ping, answers ARP
-    (GW_OK, "1", "192.168.1.5 lladdr aa:bb:cc:dd:ee:ff REACHABLE", "in-use"),
+    (GW_OK, "0", "192.0.2.5 lladdr aa:bb:cc:dd:ee:ff REACHABLE", "in-use"),  # drops ping, answers ARP
+    (GW_OK, "1", "192.0.2.5 lladdr aa:bb:cc:dd:ee:ff REACHABLE", "in-use"),
     ("", "0", "", "broken"),  # the control failed: "free" would be unproven
-    ("192.168.1.1 FAILED", "0", "", "broken"),
-    ("192.168.1.1 FAILED", "1", "192.168.1.5 lladdr aa:bb:cc:dd:ee:ff", "broken"),
+    ("192.0.2.1 FAILED", "0", "", "broken"),
+    ("192.0.2.1 FAILED", "1", "192.0.2.5 lladdr aa:bb:cc:dd:ee:ff", "broken"),
 ])
 def test_probe_verdict(control, answered, target, verdict):
     assert sh('probe_verdict "$@"', control, answered, target) == (0, verdict)
@@ -867,11 +899,11 @@ def test_prev_file_round_trips_through_the_rollback(tmp_path):
 
 def test_prev_file_keeps_manual_multi_values(tmp_path):
     prev = tmp_path / "p"
-    sh('write_prev "$@"', str(prev), "Wired connection 1", "manual", "192.168.1.7/24,10.0.0.2/8",
-       "192.168.1.1", "192.168.1.1,9.9.9.9")
+    sh('write_prev "$@"', str(prev), "Wired connection 1", "manual", "192.0.2.7/24,10.0.0.2/8",
+       "192.0.2.1", "192.0.2.1,9.9.9.9")
     assert prev.read_text().splitlines() == [
-        "conn=Wired connection 1", "method=manual", "addresses=192.168.1.7/24,10.0.0.2/8",
-        "gateway=192.168.1.1", "dns=192.168.1.1,9.9.9.9",
+        "conn=Wired connection 1", "method=manual", "addresses=192.0.2.7/24,10.0.0.2/8",
+        "gateway=192.0.2.1", "dns=192.0.2.1,9.9.9.9",
     ]
 
 
@@ -898,14 +930,14 @@ def test_stop_budget_is_ordered_inner_to_outer():
     server_t = _seconds(server, r"^ExecStop=/usr/bin/docker compose stop -t (\d+)$")
     server_timeout = _seconds(server, r"^TimeoutStopSec=(\d+)$")
     maint_t = _seconds((HOST / "bin" / "mc-maint").read_text(), r'compose\("stop", "-t", "(\d+)"')
-    scope_timeout = _seconds((SYSTEMD / "docker-.scope.d" / "10-mc-host.conf").read_text(), r"^TimeoutStopSec=(\d+)$")
+    scope_timeout = _seconds(unit_text("docker-.scope.d/10-mc-host.conf"), r"^TimeoutStopSec=(\d+)$")
     assert runner == 110
     assert runner < grace_min * 60 == server_t == maint_t == 120
     assert server_t < server_timeout == scope_timeout == 180
 
 
 def test_scope_dropin_never_orders_before_mc_server():
-    text = (SYSTEMD / "docker-.scope.d" / "10-mc-host.conf").read_text()
+    text = unit_text("docker-.scope.d/10-mc-host.conf")
     live = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
     assert live == ["[Scope]", "TimeoutStopSec=180"]
 
@@ -918,8 +950,11 @@ def test_setup_restarts_only_timers_for_changed_dropins():
 # ---- backup.sh: never tar a live world it could not flush; never leave a valid-looking partial --
 
 def backup_env(tmp_path, running, rcon_ok_after):
-    """A fake $HOME/minecraft-ai-host tree and a fake docker whose RCON answers after N `list` calls."""
-    repo = tmp_path / "home" / "minecraft-ai-host"
+    """A fake checkout (anywhere: backup.sh finds it from its own path, never from $HOME) holding a copy of
+    deploy/backup.sh, and a fake docker whose RCON answers after N `list` calls."""
+    repo = tmp_path / "srv" / "some-checkout"
+    (repo / "deploy").mkdir(parents=True)
+    shutil.copy(HOST.parent / "deploy" / "backup.sh", repo / "deploy" / "backup.sh")
     (repo / "mc_data" / "world" / "region").mkdir(parents=True)
     (repo / "mc_data" / "world" / "level.dat").write_bytes(b"level")
     (repo / "dist").mkdir()
@@ -944,22 +979,24 @@ if [ "$1" = exec ] && [ "$2" = abc123 ] && [ "$4" = list ]; then
 fi
 exit 0
 """
+    (tmp_path / "home" / "minecraft-ai-host").mkdir(parents=True)  # a decoy where the old literal pointed
     env = {"HOME": str(tmp_path / "home"), "MC_BACKUP_RCON_WAIT": "15",
            "PATH": stub_bin(tmp_path, docker=docker, sleep="exit 0")}
     return repo, calls, env
 
 
-def run_backup(env):
-    return subprocess.run(["bash", str(HOST.parent / "deploy" / "backup.sh")], env=env,
+def run_backup(repo, env):
+    return subprocess.run(["bash", str(repo / "deploy" / "backup.sh")], env=env,
                           capture_output=True, text=True, check=False)
 
 
 def test_backup_waits_for_rcon_then_flushes_and_renames(tmp_path):
     repo, calls, env = backup_env(tmp_path, running=True, rcon_ok_after=2)
-    res = run_backup(env)
+    res = run_backup(repo, env)
     assert res.returncode == 0, res.stderr
     archives = sorted((repo / "backups").iterdir())
     assert len(archives) == 1 and archives[0].name.endswith(".tar.gz")
+    assert list((tmp_path / "home" / "minecraft-ai-host").iterdir()) == []  # never $HOME/minecraft-ai-host
     assert subprocess.run(["gzip", "-t", str(archives[0])]).returncode == 0
     log = calls.read_text()
     assert log.index("save-off") > log.rindex(" list")  # flush only after RCON answered
@@ -974,7 +1011,7 @@ def test_backup_records_which_ve_commands_build_the_world_ran(tmp_path):
     repo, _, env = backup_env(tmp_path, running=False, rcon_ok_after=0)
     env["TMPDIR"] = str(tmp_path / "tmpdir")
     (tmp_path / "tmpdir").mkdir()
-    assert run_backup(env).returncode == 0
+    assert run_backup(repo, env).returncode == 0
     assert list((tmp_path / "tmpdir").iterdir()) == []  # the provenance staging dir is cleaned up
     archive = next((repo / "backups").glob("world-*.tar.gz"))
     with tarfile.open(archive) as tar:
@@ -986,11 +1023,81 @@ def test_backup_records_which_ve_commands_build_the_world_ran(tmp_path):
     mods = re.search(r'^ *MODS: *"([^"]+)"', compose, re.M).group(1)
     assert f"MODS={mods}\n" in build and "commit=" in build
     assert sha == (HOST.parent / "mod" / "RELEASE.sha256").read_text()
+    assert not [n for n in names if "pack-custom" in n or "override" in n]  # Vanilla Extended: as before
+
+
+def test_backup_leaves_out_the_ring_stamps(tmp_path):
+    """A restored world is the world as it was at the backup, while Chunky's task files and logs outside the tar
+    may say a later ring finished (a backup taken mid-ring, or before a cancel and a re-ring of the same radius):
+    a restored stamp would let `world.sh done` pass a world that holds only the earlier chunks (review 2026-10-16).
+    No stamp in the tar: a restored world is never rung until it is rung again, and Chunky's task files still go."""
+    import tarfile
+    repo, _, env = backup_env(tmp_path, running=False, rcon_ok_after=0)
+    for dim in ("overworld", "the_nether", "the_end"):
+        (repo / "mc_data" / "world" / f".ve-ring-{dim}").write_text("radius=3000\n")
+    tasks = repo / "mc_data" / "config" / "chunky" / "tasks" / "minecraft"
+    tasks.mkdir(parents=True)
+    (tasks / "overworld.properties").write_text("cancelled=true\n")
+    assert run_backup(repo, env).returncode == 0
+    with tarfile.open(next((repo / "backups").glob("world-*.tar.gz"))) as tar:
+        names = set(tar.getnames())
+    assert not [n for n in names if ".ve-ring-" in n], names
+    assert {"world/level.dat", "config/chunky/tasks/minecraft/overworld.properties"} <= names
+
+
+CUSTOM_OVERRIDE = '      MODRINTH_MODPACK: "/pack/sky-isles-1.2.0-ch1.mrpack"\n'
+
+
+def test_backup_of_a_custom_pack_tars_that_pack_and_its_source(tmp_path):
+    """A custom pack (docs/kit/CUSTOM-PACK.md): compose runs the override's pack, and pack-custom/ is in no git
+    history, so the backup carries it: the .mrpack, its mods.toml, lock.json and overrides/, and the override."""
+    import tarfile
+    repo, _, env = backup_env(tmp_path, running=False, rcon_ok_after=0)
+    (repo / "docker-compose.override.yml").write_text(CUSTOM_OVERRIDE)
+    (repo / "pack-custom" / "overrides" / "config").mkdir(parents=True)
+    (repo / "pack-custom" / "overrides" / "config" / "c.json").write_text("{}")
+    (repo / "pack-custom" / "mods.toml").write_text("[pack]\n")
+    (repo / "pack-custom" / "lock.json").write_text("{}")
+    res = run_backup(repo, env)
+    assert res.returncode == 1 and "sky-isles-1.2.0-ch1.mrpack" in res.stderr  # compose's VE file is not the live one
+    (repo / "dist" / "sky-isles-1.2.0-ch1.mrpack").write_bytes(b"pack")
+    assert run_backup(repo, env).returncode == 0
+    with tarfile.open(next((repo / "backups").glob("world-*.tar.gz"))) as tar:
+        names = set(tar.getnames())
+        build = tar.extractfile("provenance/build.txt").read().decode()
+    assert {"dist/sky-isles-1.2.0-ch1.mrpack", "pack-custom/mods.toml", "pack-custom/lock.json",
+            "pack-custom/overrides/config/c.json", "provenance/docker-compose.override.yml"} <= names
+    assert "MODRINTH_MODPACK=/pack/sky-isles-1.2.0-ch1.mrpack\n" in build
+
+
+SHELL_READERS = {
+    "deploy/backup.sh": "PACK_FILE",
+    "host/lib/standup.sh": "pack",
+}
+
+
+@pytest.mark.parametrize("override", [None, CUSTOM_OVERRIDE, "services: {}\n"])
+def test_the_shell_readers_name_the_pack_kitconfig_does(tmp_path, override):
+    """deploy/backup.sh and host/lib/standup.sh each carry a copy of kitconfig.live_pack_file's rule (an override's
+    MODRINTH_MODPACK first, else docker-compose.yml's): this is their alarm."""
+    shutil.copy(HOST.parent / "docker-compose.yml", tmp_path / "docker-compose.yml")
+    if override is not None:
+        (tmp_path / "docker-compose.override.yml").write_text(override)
+    want = kitconfig.live_pack_file(tmp_path)
+    for rel, var in SHELL_READERS.items():
+        text = (HOST.parent / rel).read_text()
+        block = re.search(r'^( *)for f in "\$\{(?:REPO_DIR|repo)\}/docker-compose\.override\.yml".*?^\1done$', text,
+                          re.S | re.M)
+        assert block, f"{rel}: the reader loop is gone"
+        loop = block.group(0).replace("${REPO_DIR}", "$R").replace("${repo}", "$R")
+        out = subprocess.run(["bash", "-c", f'set -euo pipefail; R="$1"; {var}=""; {loop}\nprintf %s "${var}"',
+                              "_", str(tmp_path)], capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout == want, (rel, out.stderr)
 
 
 def test_backup_fails_loud_when_rcon_never_answers(tmp_path):
     repo, calls, env = backup_env(tmp_path, running=True, rcon_ok_after=10_000)
-    res = run_backup(env)
+    res = run_backup(repo, env)
     assert res.returncode == 1
     assert "RCON did not answer" in res.stderr
     assert list((repo / "backups").iterdir()) == []  # no archive, no partial
@@ -999,7 +1106,7 @@ def test_backup_fails_loud_when_rcon_never_answers(tmp_path):
 
 def test_backup_of_a_stopped_server_needs_no_rcon(tmp_path):
     repo, calls, env = backup_env(tmp_path, running=False, rcon_ok_after=10_000)
-    res = run_backup(env)
+    res = run_backup(repo, env)
     assert res.returncode == 0, res.stderr
     assert len(list((repo / "backups").glob("world-*.tar.gz"))) == 1
     assert "rcon-cli" not in calls.read_text()
@@ -1009,7 +1116,7 @@ def test_backup_drops_an_old_partial(tmp_path):
     repo, _, env = backup_env(tmp_path, running=False, rcon_ok_after=0)
     (repo / "backups").mkdir()
     (repo / "backups" / "world-20260101-040000.tar.gz.partial").write_bytes(b"truncated")
-    assert run_backup(env).returncode == 0
+    assert run_backup(repo, env).returncode == 0
     assert list((repo / "backups").glob("*.partial")) == []
 
 
@@ -1028,12 +1135,12 @@ NET_STUBS = {
         '[ -f "$S/down" ] && exit 1',
         'grep -qx "$t" "$S/flap" 2>/dev/null && exit 1',
         'exit 0']),
-    "ip": 'while read -r a; do echo "3: enx001122334455    inet $a brd 192.168.1.255 scope global"; done < "$S/addr"',
+    "ip": 'while read -r a; do echo "3: enx02000000beef    inet $a brd 192.0.2.255 scope global"; done < "$S/addr"',
     "tailscale": 'echo \'{"Self": {"Online": true}}\'',
     "timeout": 'shift; exec "$@"',
     "nmcli": "\n".join([
         'if [ "$1" = --wait ]; then echo "$2" > "$S/nmcli_wait"; exit 0; fi',
-        '[ "$1" = -g ] && echo enx001122334455']),
+        '[ "$1" = -g ] && echo enx02000000beef']),
     "systemctl": "\n".join([
         'case "$1" in',
         '  is-active) [ -f "$S/timer_active" ];;',
@@ -1045,7 +1152,7 @@ NET_STUBS = {
 CLOCK0, DEADLINE = 1000, 1180
 
 
-def net_apply(tmp_path, addr="192.168.1.5/24", timer_active=True, clock=CLOCK0, **files):
+def net_apply(tmp_path, addr="192.0.2.5/24", timer_active=True, clock=CLOCK0, **files):
     st = tmp_path / "s"
     st.mkdir()
     (st / "clock").write_text(f"{clock}\n")
@@ -1056,7 +1163,7 @@ def net_apply(tmp_path, addr="192.168.1.5/24", timer_active=True, clock=CLOCK0, 
         (st / name).write_text(content)
     env = {"S": str(st), "PATH": stub_bin(tmp_path, **NET_STUBS), "MC_NET_FIRED": str(st / "fired")}
     res = subprocess.run(["bash", str(HOST / "bin" / "mc-net-commit"), "apply", "Wired connection 1",
-                          "192.168.1.5", "192.168.1.1", str(DEADLINE)],
+                          "192.0.2.5", "192.0.2.1", str(DEADLINE)],
                          env=env, capture_output=True, text=True, check=False)
     pings = [ln.split() for ln in (st / "pings").read_text().splitlines()] if (st / "pings").exists() else []
     stopped = (st / "systemctl").read_text() if (st / "systemctl").exists() else ""
@@ -1065,7 +1172,7 @@ def net_apply(tmp_path, addr="192.168.1.5/24", timer_active=True, clock=CLOCK0, 
 
 def check_times(pings):
     """Start second of each healthy() check (each check sends its source-bound ping first)."""
-    return [int(p[0]) for p in pings if p[-2] == "192.168.1.5"]
+    return [int(p[0]) for p in pings if p[-2] == "192.0.2.5"]
 
 
 def test_confirms_only_after_three_checks_spanning_15s(tmp_path):
@@ -1079,8 +1186,8 @@ def test_confirms_only_after_three_checks_spanning_15s(tmp_path):
 
 def test_pings_go_from_the_static_source_and_through_the_wired_device(tmp_path):
     _, _, pings, _ = net_apply(tmp_path)
-    assert {tuple(p[1:-1]) for p in pings} == {("-c2", "-W1", "-I", "192.168.1.5"),
-                                               ("-c2", "-W1", "-I", "enx001122334455")}
+    assert {tuple(p[1:-1]) for p in pings} == {("-c2", "-W1", "-I", "192.0.2.5"),
+                                               ("-c2", "-W1", "-I", "enx02000000beef")}
 
 
 def test_nmcli_wait_is_bounded_by_the_deadline(tmp_path):
@@ -1105,7 +1212,7 @@ def test_a_flap_restarts_the_streak(tmp_path):
 
 
 def test_a_leftover_dhcp_address_is_not_healthy(tmp_path):
-    res, _, _, stopped = net_apply(tmp_path, addr="192.168.1.5/24\n192.168.1.234/24")
+    res, _, _, stopped = net_apply(tmp_path, addr="192.0.2.5/24\n192.0.2.234/24")
     assert res.returncode == 1 and stopped == ""
 
 
@@ -1130,12 +1237,12 @@ def test_no_time_left_does_nothing(tmp_path):
 # ---- check.sh conflict classification (host/lib/net.sh) --------------------------------------
 
 NM_JOURNAL = "\n".join([
-    "Sep 29 08:01:02 asus-node NetworkManager[812]: <warn>  [1759147262.1] device (enx001122334455): "
-    "conflict detected for IP address 192.168.1.234 with host 02:00:00:00:00:02",
-    "Sep 29 08:01:02 asus-node NetworkManager[812]: <info>  [1759147262.2] dhcp4 (enx001122334455): state changed",
-    "Sep 29 21:40:00 asus-node NetworkManager[812]: <warn>  [1759196400.0] l3cfg[1,ifindex=3]: "
-    "acd[192.168.1.50, used]: address conflict for 192.168.1.50 detected with 00:11:22:33:44:55",
-    "Sep 29 21:41:00 asus-node NetworkManager[812]: <info>  [1759196460.0] manager: NetworkManager state is now CONNECTED_GLOBAL",
+    "Sep 29 08:01:02 kit-box NetworkManager[812]: <warn>  [1759147262.1] device (enx02000000beef): "
+    "conflict detected for IP address 192.0.2.234 with host 02:00:00:00:00:02",
+    "Sep 29 08:01:02 kit-box NetworkManager[812]: <info>  [1759147262.2] dhcp4 (enx02000000beef): state changed",
+    "Sep 29 21:40:00 kit-box NetworkManager[812]: <warn>  [1759196400.0] l3cfg[1,ifindex=3]: "
+    "acd[192.0.2.50, used]: address conflict for 192.0.2.50 detected with 00:11:22:33:44:55",
+    "Sep 29 21:41:00 kit-box NetworkManager[812]: <info>  [1759196460.0] manager: NetworkManager state is now CONNECTED_GLOBAL",
 ])
 
 
@@ -1144,18 +1251,18 @@ def test_conflict_lines_finds_nm_146_forms():
     assert rc == 0 and len(out.splitlines()) == 2
 
 
-def test_todays_old_dhcp_conflict_does_not_count_for_192_168_1_5():
+def test_todays_old_dhcp_conflict_does_not_count_for_192_168_2_5():
     _, conflicts = sh("conflict_lines <<<\"$1\"", NM_JOURNAL)
-    assert sh('lines_for_ip 192.168.1.5 <<<"$1"', conflicts) == (0, "")  # neither .234 nor .50 is .5
-    rc, mine = sh('lines_for_ip 192.168.1.234 <<<"$1"', conflicts)
-    assert "192.168.1.234 with host" in mine and len(mine.splitlines()) == 1
+    assert sh('lines_for_ip 192.0.2.5 <<<"$1"', conflicts) == (0, "")  # neither .234 nor .50 is .5
+    rc, mine = sh('lines_for_ip 192.0.2.234 <<<"$1"', conflicts)
+    assert "192.0.2.234 with host" in mine and len(mine.splitlines()) == 1
 
 
 def test_a_conflict_for_the_current_address_is_found():
-    line = ("Oct 02 10:00:00 asus-node NetworkManager[812]: <warn> l3cfg[1,ifindex=3]: IPv4 address collision "
-            "detection sees conflict on interface 3 (enx001122334455) for address 192.168.1.5 from host aa:bb:cc:dd:ee:ff")
+    line = ("Oct 02 10:00:00 kit-box NetworkManager[812]: <warn> l3cfg[1,ifindex=3]: IPv4 address collision "
+            "detection sees conflict on interface 3 (enx02000000beef) for address 192.0.2.5 from host aa:bb:cc:dd:ee:ff")
     _, conflicts = sh("conflict_lines <<<\"$1\"", NM_JOURNAL + "\n" + line)
-    assert sh('lines_for_ip 192.168.1.5 <<<"$1"', conflicts) == (0, line)
+    assert sh('lines_for_ip 192.0.2.5 <<<"$1"', conflicts) == (0, line)
 
 
 def test_check_sh_fails_on_the_current_address_and_only_informs_on_others():
@@ -1225,7 +1332,7 @@ def test_check_fails_a_mailbox_that_runs_through_a_symlink(tmp_path):
     run_step10(tmp_path)
     mcve = tmp_path / "mc_data" / "mcve"
     world = tmp_path / "mc_data" / "world"
-    mcve.rename(world)  # world/{out,in} exist, mm-mike 755: they would PASS if the link were followed
+    mcve.rename(world)  # world/{out,in} exist, the kit user's 755: they would PASS if the link were followed
     mcve.symlink_to(world)
     results = run_mailbox_check(tmp_path)
     linked = [(st, msg) for st, msg in results if "symlink" in msg]
@@ -1285,7 +1392,8 @@ exit 0
 def test_world_ring_refuses_while_pause_when_empty_is_on(tmp_path, props, ok):
     (tmp_path / "deploy").mkdir()
     shutil.copy(HOST.parent / "deploy" / "world.sh", tmp_path / "deploy" / "world.sh")
-    (tmp_path / "mc_data").mkdir()
+    (tmp_path / "mc_data" / "world").mkdir(parents=True)
+    (tmp_path / "mc_data" / "world" / "level.dat").write_bytes(b"\x1f\x8b")
     if props is not None:
         (tmp_path / "mc_data" / "server.properties").write_text(props)
     calls = tmp_path / "calls"
@@ -1355,7 +1463,7 @@ def test_the_daily_run_alerts_on_the_disk_even_with_no_reboot_pending(monkeypatc
 
 # ---- mc-bridge-fence, for real: apply / check / remove inside a throwaway network namespace (rv3) ------------
 # A container with NET_ADMIN and --network none is its own netns: the real script, the real iptables. Packets
-# were proven live on the workstation (bridge/README.md "Containment"); this pins the rule logic against regressions.
+# were proven live on the dev machine (bridge/README.md "Containment"); this pins the rule logic against regressions.
 # Needs docker: without it these FAIL, never skip.
 
 FENCE_IMAGE = "mc-fence-test:local"
@@ -1489,7 +1597,87 @@ def test_check_fails_loud_when_compose_cannot_parse_and_never_echoes_its_error(t
     st, msg = r.stdout.strip().split("\t", 1)
     assert st == want and "SECRET-VALUE" not in r.stdout + r.stderr
     if want == "FAIL":
-        assert ".env.bridge" in msg
+        assert ".env.bridge" in msg and compose_hint_problems(msg) == []
+
+
+def compose_hint_problems(msg):
+    """The FAIL's hint must never send anyone to compose's own error (it can quote .env.bridge's token); it names
+    the tools that show the cause without a value: render --check, and check.sh's shape-only lines."""
+    problems = [w for w in ("yourself", "to see why", "Run 'docker compose config") if w in msg]
+    if "python3 kit/render.py --check" not in msg or "Never print compose's own error" not in msg:
+        problems.append("the safe route is not named")
+    return problems
+
+
+def test_the_compose_hint_pin_catches_the_old_hint():
+    old = ("docker compose config FAILS: most likely .env.bridge (a malformed line, wrong owner or mode, or a "
+           "directory; see 'bridge token file' below). Run 'docker compose config -q' yourself to see why (its error "
+           "can quote the file)")
+    assert compose_hint_problems(old)
+
+
+# ---- check.sh --no-ssh: a one-machine kit install that wants no SSH (docs/kit/KIT.md P7, P10) --------------------
+
+CHECK_SSH = section(HOST / "check.sh", "# ---- ssh ---", "# ---- bridge mailbox")
+CHECK_RES = section(HOST / "check.sh", "FAILS=0\nres() {", "# expect NAME WANT HAVE")
+CHECK_TAIL = (HOST / "check.sh").read_text()[(HOST / "check.sh").read_text().rindex('\necho\nif [ "$FAILS" -gt 0 ]'):]
+
+
+def run_check_ssh(tmp_path, no_ssh, ssh_state="inactive\ninactive", other_fail=False, body=CHECK_SSH):
+    """The ssh section verbatim between check.sh's own res() and its own exit, with systemctl and sshd stubbed
+    (sshd records that it ran). -> (exit code, [(status, text)])."""
+    path = stub_bin(tmp_path, systemctl=f"printf '{ssh_state}\\n'; exit 3",
+                    sshd=f'echo ran >> {tmp_path}/sshd.log; exit 1', sudo="exit 1")
+    script = (f"HOST_DIR={HOST}\nNO_SSH={1 if no_ssh else 0}\nsection() {{ :; }}\n"
+              "as_root() { if [ \"$(id -u)\" -eq 0 ]; then \"$@\"; else return 99; fi; }\n" + CHECK_RES
+              + ('res FAIL "a FAIL in another section"\n' if other_fail else "") + body + CHECK_TAIL)
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={**os.environ, "PATH": path})
+    lines = [tuple(ln.split(None, 1)) for ln in r.stdout.splitlines() if ln[:4] in ("PASS", "FAIL", "SKIP")]
+    return r.returncode, lines
+
+
+def test_check_no_ssh_passes_with_no_ssh_server_and_never_reads_sshd(tmp_path):
+    rc, lines = run_check_ssh(tmp_path, no_ssh=True)
+    assert rc == 0 and [s for s, _ in lines] == ["PASS", "SKIP"], lines
+    assert not (tmp_path / "sshd.log").exists()
+
+
+@pytest.mark.parametrize("state", ["active\ninactive", "inactive\nactive", "activating\ninactive", ""])
+def test_check_no_ssh_fails_when_an_ssh_server_runs_or_systemctl_does_not_say(tmp_path, state):
+    rc, lines = run_check_ssh(tmp_path, no_ssh=True, ssh_state=state)
+    assert rc == 1 and ("FAIL" in [s for s, _ in lines]), lines
+
+
+def test_check_no_ssh_still_fails_on_a_fail_in_another_section(tmp_path):
+    """--no-ssh turns the ssh lines into a precise check; it never lets another section's FAIL through."""
+    rc, lines = run_check_ssh(tmp_path, no_ssh=True, other_fail=True)
+    assert rc == 1 and ("FAIL", "a FAIL in another section") in lines
+
+
+def test_check_without_the_flag_holds_the_key_only_lines(tmp_path):
+    """asus-node's check.sh, unchanged: the key-only drop-in must be installed (here it is not: FAIL)."""
+    rc, lines = run_check_ssh(tmp_path, no_ssh=False)
+    assert rc == 1 and ("FAIL", "/etc/ssh/sshd_config.d/10-mc-host.conf missing or differs") in lines
+
+
+def test_only_the_ssh_section_reads_no_ssh():
+    text = (HOST / "check.sh").read_text()
+    parse = section(HOST / "check.sh", "NO_SSH=0\ncase", "# >>> kit config")
+    assert text.count("NO_SSH") == parse.count("NO_SSH") + CHECK_SSH.count("NO_SSH") and CHECK_SSH.count("NO_SSH") == 1
+    assert "--no-ssh) NO_SSH=1 ;;" in parse
+    r = subprocess.run(["bash", str(HOST / "check.sh"), "--bogus"], capture_output=True, text=True)
+    assert r.returncode == 2 and "usage: bash host/check.sh [--no-ssh]" in r.stderr
+
+
+NO_SSH_GUARD = 'if [ "$ssh_state" = "inactive inactive" ]; then'
+
+
+@pytest.mark.parametrize("mutant", ["if true; then", 'if [ -n "$ssh_state" ]; then'])
+def test_the_no_ssh_server_check_catches_its_mutant(tmp_path, mutant):
+    assert CHECK_SSH.count(NO_SSH_GUARD) == 1, "stale or ambiguous mutation pattern"
+    rc, lines = run_check_ssh(tmp_path, no_ssh=True, ssh_state="active\ninactive",
+                              body=CHECK_SSH.replace(NO_SSH_GUARD, mutant))
+    assert rc == 0 and "FAIL" not in [s for s, _ in lines]  # the mutant passes a running SSH server
 
 
 
@@ -1885,7 +2073,7 @@ def test_check_relays_the_heal_state_and_fails_closed(tmp_path, stub, want):
 
 def test_mc_heal_units():
     svc, timer = unit_text("mc-heal.service"), unit_text("mc-heal.timer")
-    for line in ["User=mm-mike", "Type=oneshot", "ExecStart=/usr/local/sbin/mc-heal", "StateDirectory=mc-heal",
+    for line in [f"User={KIT['MC_USER']}", "Type=oneshot", "ExecStart=/usr/local/sbin/mc-heal", "StateDirectory=mc-heal",
                  "OnFailure=mc-alert@%n.service"]:
         assert line in svc.splitlines(), line
     assert "OnBootSec=10min" in timer and "OnUnitActiveSec=2min" in timer
@@ -1893,7 +2081,7 @@ def test_mc_heal_units():
     src = (HOST / "bin" / "mc-heal").read_text()
     worst = hl.RCON_TIMEOUT + sum(int(x) for x in re.findall(r"\], (\d+), cwd=REPO\)", src)) + 60 + 60  # logs, alert
     assert worst < budget
-    assert "StateDirectory=mc-host" not in svc  # the root units' dir would be chowned to mm-mike and back
+    assert "StateDirectory=mc-host" not in svc  # the root units' dir would be chowned to the kit user and back
 
 
 def test_setup_enables_and_check_asserts_the_heal_timer():
@@ -1930,6 +2118,20 @@ def test_a_flag_that_exists_but_cannot_be_read_still_stands_mc_heal_down(heal_en
     assert json.loads((s / "state.json").read_text()) == seeded
 
 
+def test_agents_md_tables_have_no_orphan_rows():
+    """Every table row continues a table or opens one (header + separator). A block dropped mid-table leaves the
+    rows below it headerless, rendered as text (the Host-maintenance table lost Bridge fence and SSH that way)."""
+    lines = (HOST.parent / "AGENTS.md").read_text().splitlines()
+    sep = re.compile(r"^\|(\s*:?-+:?\s*\|)+$")
+    orphans = [f"{i + 1}: {ln[:40]}" for i, ln in enumerate(lines) if ln.startswith("|")
+               and not (i > 0 and lines[i - 1].startswith("|"))
+               and not (i + 1 < len(lines) and sep.match(lines[i + 1]))]
+    assert orphans == []
+    host = section(HOST.parent / "AGENTS.md", "| Piece | What | Disable |", "**mc-heal (the hang watchdog")
+    for row in ("| `mc-heal.timer` |", "| Alerts |", "| Bridge fence |", "| SSH |"):
+        assert f"\n{row}" in host
+
+
 def test_the_maintenance_flag_has_one_name_in_world_sh_and_mc_heal():
     world = (HOST.parent / "deploy" / "world.sh").read_text()
     assert re.search(r"^MAINT_FLAG=(\S+)$", world, re.M).group(1) == hl.MAINT_FLAG == "maintenance"
@@ -1937,11 +2139,13 @@ def test_the_maintenance_flag_has_one_name_in_world_sh_and_mc_heal():
 
 
 def world_ring(tmp_path, chunky_reply="[Chunky] Task started in minecraft:overworld (square, 3000)", props="-1",
-               flag=None, fail_on=None):
+               flag=None, fail_on=None, world=True):
     """world.sh ring against a stub docker; fail_on: an rcon command substring that the stub fails (exit 1)."""
     (tmp_path / "deploy").mkdir(exist_ok=True)
     shutil.copy(HOST.parent / "deploy" / "world.sh", tmp_path / "deploy" / "world.sh")
-    (tmp_path / "mc_data").mkdir(exist_ok=True)
+    (tmp_path / "mc_data" / "world").mkdir(parents=True, exist_ok=True)
+    if world:
+        (tmp_path / "mc_data" / "world" / "level.dat").write_bytes(b"\x1f\x8b")
     (tmp_path / "mc_data" / "server.properties").write_text(f"pause-when-empty-seconds={props}\n")
     if flag is not None:
         (tmp_path / "maintenance").write_text(flag)
@@ -1955,7 +2159,9 @@ case "$*" in
 esac
 case "$*" in
   *"worldborder get"*) echo "The world border is currently 6000.0 block(s) wide";;
-  *"chunky start"*) [ -e {tmp_path}/maintenance ] && echo "flag present at chunky start" >> {calls}; echo "{chunky_reply}";;
+  *"chunky start"*) [ -e {tmp_path}/maintenance ] && echo "flag present at chunky start" >> {calls}
+     [ -e {tmp_path}/mc_data/world/.ve-ring-overworld ] && echo "stamp present at chunky start" >> {calls}
+     echo "{chunky_reply}";;
 esac
 exit 0
 """
@@ -1971,6 +2177,32 @@ def test_a_ring_sets_the_maintenance_flag_before_chunky_starts(tmp_path):
     assert "flag present at chunky start" in calls
     assert flag.read_text().startswith("ring overworld r=3000 since ")
     assert "deploy/world.sh maintenance off" in r.stdout
+
+
+def test_a_ring_stamps_the_world_before_chunky_starts(tmp_path):
+    """`done` accepts only Chunky's evidence newer than this stamp; it records latest.log's size and the sha256 of
+    those bytes."""
+    logs = tmp_path / "mc_data" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "latest.log").write_text("x" * 37)
+    r, calls, _ = world_ring(tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "stamp present at chunky start" in calls
+    stamp = (tmp_path / "mc_data" / "world" / ".ve-ring-overworld").read_text()
+    assert re.fullmatch(rf"radius=3000\nsince=\S+Z\nlog_size=37\nlog_head={hashlib.sha256(b'x' * 37).hexdigest()}\n",
+                        stamp), stamp
+    other = tmp_path / "other"  # no latest.log yet: nothing came before the ring
+    other.mkdir()
+    r, _, _ = world_ring(other)
+    assert r.returncode == 0, r.stderr
+    assert (other / "mc_data" / "world" / ".ve-ring-overworld").read_text().endswith(
+        f"log_size=0\nlog_head={hashlib.sha256(b'').hexdigest()}\n")
+
+
+def test_a_ring_refuses_without_a_world(tmp_path):
+    r, calls, flag = world_ring(tmp_path, world=False)
+    assert r.returncode == 1 and "no world at mc_data/world/level.dat" in r.stderr
+    assert "chunky" not in calls and "worldborder set" not in calls and not flag.exists()
 
 
 def test_a_refused_or_unconfirmed_ring_leaves_no_flag(tmp_path):
@@ -2021,3 +2253,1209 @@ def test_world_maintenance_on_off(tmp_path):
     assert hl.status_lines(T0, {}, (tmp_path / "maintenance").read_text().strip())[0][0] == "WARN"
     r = ws("off")
     assert r.returncode == 0 and "cleared" in r.stdout and not (tmp_path / "maintenance").exists()
+
+
+# ---- world.sh done: Chunky finished every ring (proof run 2026-10-16: a P9 cut at 46% still passed the gates) ----
+
+RINGS = {"overworld": (3000, 142129), "the_nether": (1500, 35721), "the_end": (2000, 63001)}  # radius, total
+# A live server's own finished rings (the friends' server, asus-node), read from its task files and logs (review
+# 2026-10-16): saved 51, 38 and 51 short of their totals, while the logs say each one finished at 100%. A fixed
+# in-flight window of 50 failed two of them.
+ASUS_NODE_SAVED = {"overworld": 142078, "the_nether": 35683, "the_end": 62950}
+
+
+# a log's first line
+SESSION_START = "[11:00:00] [main/INFO]: Environment: Environment[sessionHost=https://sessionserver.mojang.com]\n"
+
+
+def finished_line(dim, total):
+    return (f"[12:00:00] [Server thread/INFO]: [Chunky] Task finished for minecraft:{dim}. Processed: {total} chunks "
+            "(100.00%), Total time: 2:01:13\n")
+
+
+def ring_stamp(data, dim, radius=None, ago=100, log=None, level="world"):
+    """What `world.sh ring` writes into the world dir just before `chunky start`, dated `ago` seconds back: -nt
+    compares times, so a stamp written in the same instant as the files after it would prove nothing. `log`: the
+    latest.log it found then, recorded by its size and the sha256 of those bytes."""
+    radius = RINGS[dim][0] if radius is None else radius
+    held = log.read_bytes() if log is not None else b""
+    s = data / level / f".ve-ring-{dim}"
+    s.parent.mkdir(parents=True, exist_ok=True)
+    s.write_text(f"radius={radius}\nsince=2026-10-16T03:00:00Z\nlog_size={len(held)}\n"
+                 f"log_head={hashlib.sha256(held).hexdigest()}\n")
+    t = time.time() - ago
+    os.utime(s, (t, t))
+    return s
+
+
+def chunky_task(data, dim, chunks, cancelled=True, radius=None, shape="square", pattern="region", cx="0.0", cz="0.0"):
+    """A task file as Chunky 1.5.3's TaskLoader.writeTask writes it (its TaskProperty order, key=value lines)."""
+    radius = RINGS[dim][0] if radius is None else radius
+    f = data / "config" / "chunky" / "tasks" / "minecraft" / f"{dim}.properties"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f"world=minecraft:{dim}\ncancelled={str(cancelled).lower()}\ncenter-x={cx}\ncenter-z={cz}\n"
+                 f"radius={float(radius)}\nshape={shape}\npattern={pattern}\nchunks={chunks}\ntime=3600000\n")
+    return f
+
+
+def world_done(tmp_path, *args, data=None):
+    (tmp_path / "deploy").mkdir(exist_ok=True)
+    shutil.copy(HOST.parent / "deploy" / "world.sh", tmp_path / "deploy" / "world.sh")
+    # no docker on PATH: `done` reads files only, so it works on a copy and with the server down
+    env = {"PATH": stub_bin(tmp_path, docker="echo docker called >&2; exit 99"), "HOME": str(tmp_path)}
+    if data is not None:
+        env["MC_DATA"] = str(data)
+    r = subprocess.run(["bash", str(tmp_path / "deploy" / "world.sh"), "done", *args], env=env, capture_output=True,
+                       text=True)
+    assert "docker called" not in r.stderr
+    return r
+
+
+def all_finished(tmp_path, short=0, saved=None):
+    for dim, (_, total) in RINGS.items():
+        ring_stamp(tmp_path / "mc_data", dim)
+        chunky_task(tmp_path / "mc_data", dim, (saved or {}).get(dim, total - short))
+
+
+def test_world_done_passes_three_finished_rings(tmp_path):
+    all_finished(tmp_path)
+    r = world_done(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines() == ["overworld: done, radius 3000, 142129 of 142129 chunks",
+                                     "the_nether: done, radius 1500, 35721 of 35721 chunks",
+                                     "the_end: done, radius 2000, 63001 of 63001 chunks"]
+    assert world_done(tmp_path, "overworld=3000", "the_nether=1500", "the_end=2000").returncode == 0
+
+
+def test_world_done_fails_the_proof_run_world(tmp_path):
+    """The VM: the overworld cancelled at 46%, the Nether and the End cancelled within seconds of starting."""
+    data = tmp_path / "mc_data"
+    for dim, chunks in (("overworld", 65379), ("the_nether", 312), ("the_end", 0)):
+        ring_stamp(data, dim)
+        chunky_task(data, dim, chunks)
+    r = world_done(tmp_path)
+    assert r.returncode == 1
+    assert "overworld: NOT done: radius 3000, cancelled at 65379 of 142129 chunks (46.0%)" in r.stdout
+    assert "the_nether: NOT done" in r.stdout and "the_end: NOT done" in r.stdout
+
+
+def test_world_done_passes_asus_node_s_real_finished_rings_on_their_log_lines(tmp_path):
+    """asus-node's saved counts are 51, 38 and 51 short. Its logs say each one finished: that is what decides."""
+    all_finished(tmp_path, saved=ASUS_NODE_SAVED)
+    r = world_done(tmp_path)
+    assert r.returncode == 1
+    for dim, saved in ASUS_NODE_SAVED.items():
+        assert f"{dim}: NOT done: radius {RINGS[dim][0]}, cancelled at {saved} of {RINGS[dim][1]}" in r.stdout
+    logs = tmp_path / "mc_data" / "logs"
+    logs.mkdir()
+    for n, dim in enumerate(RINGS, 1):  # rotated logs count, as well as latest.log
+        with gzip.open(logs / f"2026-10-02-{n}.log.gz", "wt") as f:
+            f.write(finished_line(dim, RINGS[dim][1]))
+    r = world_done(tmp_path, "overworld=3000", "the_nether=1500", "the_end=2000")
+    assert r.returncode == 0, r.stdout
+    assert ("overworld: done, radius 3000, 142078 of 142129 chunks saved, and the log says it finished"
+            in r.stdout)
+
+
+@pytest.mark.parametrize("short", [1, 38, 51, 5000])
+@pytest.mark.parametrize("dim", list(RINGS))
+def test_world_done_fails_a_ring_short_of_its_total_without_its_finished_line(tmp_path, dim, short):
+    all_finished(tmp_path)
+    chunky_task(tmp_path / "mc_data", dim, RINGS[dim][1] - short)
+    r = world_done(tmp_path)
+    assert r.returncode == 1 and f"{dim}: NOT done: radius {RINGS[dim][0]}, cancelled at" in r.stdout
+    assert "no log line since the ring started says it finished" in r.stdout
+
+
+def test_world_done_needs_the_finished_line_with_this_ring_s_total(tmp_path):
+    all_finished(tmp_path, short=10)
+    logs = tmp_path / "mc_data" / "logs"
+    logs.mkdir()
+    (logs / "latest.log").write_text(finished_line("overworld", 142129) + finished_line("the_nether", 35721)
+                                     + finished_line("the_end", 63000))
+    r = world_done(tmp_path)
+    assert r.returncode == 1  # the End's line names another total: it is not this task's finish
+    assert "overworld: done, radius 3000, 142119 of 142129 chunks saved, and the log says it finished" in r.stdout
+    assert "the_nether: done" in r.stdout and "the_end: NOT done" in r.stdout
+    with open(logs / "latest.log", "a") as f:
+        f.write(finished_line("the_end", 63001))
+    assert world_done(tmp_path).returncode == 0
+
+
+def test_world_done_fails_a_ring_never_started(tmp_path):
+    all_finished(tmp_path)
+    (tmp_path / "mc_data" / "config" / "chunky" / "tasks" / "minecraft" / "the_end.properties").unlink()
+    r = world_done(tmp_path)
+    assert r.returncode == 1 and "the_end: NOT done: no Chunky task file" in r.stdout
+
+
+def test_world_done_fails_a_world_never_rung(tmp_path):
+    """A pack switch or a re-seed (CUSTOM-PACK.md, AGENTS.md): the old world is moved to an archive with its stamps,
+    while its finished task files and its logs stay in mc_data/. The new world has no stamp: nothing vouches for it."""
+    all_finished(tmp_path, short=10)
+    logs = tmp_path / "mc_data" / "logs"
+    logs.mkdir()
+    (logs / "latest.log").write_text("".join(finished_line(d, t) for d, (_, t) in RINGS.items()))
+    assert world_done(tmp_path).returncode == 0
+    (tmp_path / "mc_data" / "world").rename(tmp_path / "mc_data" / "world.archived")
+    r = world_done(tmp_path)
+    assert r.returncode == 1
+    for dim in RINGS:
+        assert f"{dim}: NOT done: no ring stamp (mc_data/world/.ve-ring-{dim})" in r.stdout
+
+
+def test_world_done_fails_a_task_file_older_than_the_ring(tmp_path):
+    """The new world is rung (fresh stamps), but Chunky has not saved a task since: the files are the old world's, or
+    the new ring is still running."""
+    all_finished(tmp_path)
+    for dim in RINGS:
+        ring_stamp(tmp_path / "mc_data", dim, ago=10)
+        f = tmp_path / "mc_data" / "config" / "chunky" / "tasks" / "minecraft" / f"{dim}.properties"
+        t = time.time() - 50
+        os.utime(f, (t, t))
+    r = world_done(tmp_path)
+    assert r.returncode == 1
+    assert "overworld: NOT done: Chunky has saved no task since this world's ring started" in r.stdout
+    assert "the_end: NOT done: Chunky has saved no task" in r.stdout
+
+
+def test_world_done_reads_only_log_text_written_since_the_ring(tmp_path):
+    """An older finished line of the same total (an earlier world, or an earlier ring of the same radius) never
+    vouches for this ring: rotated logs older than the stamp are skipped, and the log the ring started in is read
+    past the bytes the stamp recorded."""
+    data = tmp_path / "mc_data"
+    all_finished(tmp_path, short=10)
+    logs = data / "logs"
+    logs.mkdir()
+    old = logs / "2026-10-01-1.log.gz"
+    with gzip.open(old, "wt") as f:
+        f.write(finished_line("overworld", 142129))
+    t = time.time() - 500
+    os.utime(old, (t, t))
+    latest = logs / "latest.log"
+    before = finished_line("the_nether", 35721) + finished_line("the_end", 63001)
+    latest.write_text(before)
+    for dim in RINGS:  # the ring started while latest.log held `before`
+        ring_stamp(data, dim, log=latest)
+    os.utime(latest, None)
+    r = world_done(tmp_path)
+    assert r.returncode == 1
+    for dim in RINGS:
+        assert f"{dim}: NOT done" in r.stdout
+    with open(latest, "a") as f:  # the same file grows: only what it gained since counts
+        f.write(finished_line("the_nether", 35721) + finished_line("the_end", 63001))
+    with gzip.open(logs / "2026-10-16-1.log.gz", "wt") as f:  # rotated after the ring started
+        f.write(finished_line("overworld", 142129))
+    r = world_done(tmp_path)
+    assert r.returncode == 0, r.stdout
+    new = logs / "latest.log.new"  # a restart began a new latest.log: all of it is newer than the ring
+    new.write_text(SESSION_START + finished_line("the_nether", 35721) + finished_line("the_end", 63001))
+    os.replace(new, latest)
+    assert world_done(tmp_path).returncode == 0
+
+
+@pytest.mark.parametrize("how", ["live", "cp -a copy", "rotated by a restart"])
+def test_world_done_never_reads_log_text_from_before_the_ring_in_a_copy_or_a_rotated_log(tmp_path, how):
+    """An earlier overworld ring of the same radius printed its finished line in this server session, before this
+    ring's stamp. This ring is then cancelled short. A `cp -a` copy (MC_DATA) has new inodes, and a restart gzips the
+    old latest.log whole: the earlier line must not vouch for this ring there either (review 2026-10-16). The stamped
+    log is known by its first bytes, wherever it is, and only what follows them counts."""
+    data = tmp_path / "mc_data"
+    for dim in ("the_nether", "the_end"):
+        ring_stamp(data, dim)
+        chunky_task(data, dim, RINGS[dim][1])
+    logs = data / "logs"
+    logs.mkdir()
+    latest = logs / "latest.log"
+    latest.write_text(SESSION_START + finished_line("overworld", 142129))
+    ring_stamp(data, "overworld", log=latest)
+    with open(latest, "a") as f:
+        f.write("[12:30:00] [Server thread/INFO]: [Chunky] Task started for minecraft:overworld\n"
+                "[13:00:00] [Server thread/INFO]: [Chunky] Task cancelled for minecraft:overworld.\n")
+    chunky_task(data, "overworld", 137129)
+    if how == "cp -a copy":
+        data = tmp_path / "copy"
+        subprocess.run(["cp", "-a", str(tmp_path / "mc_data"), str(data)], check=True)
+        assert (data / "logs" / "latest.log").stat().st_ino != latest.stat().st_ino
+    elif how == "rotated by a restart":
+        with gzip.open(logs / "2026-10-16-1.log.gz", "wb") as f:
+            f.write(latest.read_bytes())
+        latest.write_text(SESSION_START)
+    r = world_done(tmp_path, data=data)
+    assert r.returncode == 1, r.stdout
+    assert "overworld: NOT done: radius 3000, cancelled at 137129 of 142129 chunks" in r.stdout
+
+
+@pytest.mark.parametrize("how", ["live", "cp -a copy", "rotated by a restart"])
+def test_world_done_finds_the_ring_s_own_finished_line_in_a_copy_or_a_rotated_log(tmp_path, how):
+    """The stamped log read past its first bytes still holds this ring's own finished line, in a copy and once
+    rotated: a ring saved 51 short passes on it."""
+    data = tmp_path / "mc_data"
+    for dim in ("the_nether", "the_end"):
+        ring_stamp(data, dim)
+        chunky_task(data, dim, RINGS[dim][1])
+    logs = data / "logs"
+    logs.mkdir()
+    latest = logs / "latest.log"
+    latest.write_text(SESSION_START)
+    ring_stamp(data, "overworld", log=latest)
+    with open(latest, "a") as f:
+        f.write(finished_line("overworld", 142129))
+    chunky_task(data, "overworld", 142078)
+    if how == "cp -a copy":
+        data = tmp_path / "copy"
+        subprocess.run(["cp", "-a", str(tmp_path / "mc_data"), str(data)], check=True)
+    elif how == "rotated by a restart":
+        with gzip.open(logs / "2026-10-16-1.log.gz", "wb") as f:
+            f.write(latest.read_bytes())
+        latest.write_text(SESSION_START)
+    r = world_done(tmp_path, data=data)
+    assert r.returncode == 0, r.stdout
+    assert "overworld: done, radius 3000, 142078 of 142129 chunks saved, and the log says it finished" in r.stdout
+
+
+def test_world_done_reads_no_log_for_a_stamp_without_its_log_record(tmp_path):
+    """Without the size and sha256 it cannot tell the text from before the ring: no log line counts (fails closed)."""
+    all_finished(tmp_path, short=10)
+    logs = tmp_path / "mc_data" / "logs"
+    logs.mkdir()
+    (logs / "latest.log").write_text(SESSION_START + "".join(finished_line(d, t) for d, (_, t) in RINGS.items()))
+    assert world_done(tmp_path).returncode == 0
+    s = tmp_path / "mc_data" / "world" / ".ve-ring-overworld"
+    t = s.stat().st_mtime
+    s.write_text("radius=3000\nsince=2026-10-16T03:00:00Z\nlog_inode=7\nlog_size=0\n")  # no log_head
+    os.utime(s, (t, t))
+    r = world_done(tmp_path)
+    assert r.returncode == 1 and "overworld: NOT done: radius 3000, cancelled at 142119" in r.stdout
+
+
+def test_world_done_fails_a_paused_ring_even_at_its_total(tmp_path):
+    """cancelled=false: paused, or saved by a shutdown mid-ring; continueOnRestart resumes it."""
+    all_finished(tmp_path)
+    chunky_task(tmp_path / "mc_data", "overworld", 142129, cancelled=False)
+    r = world_done(tmp_path)
+    assert r.returncode == 1 and "overworld: NOT done: radius 3000, 142129 of 142129 chunks (100.0%), paused" \
+        in r.stdout
+
+
+def test_world_done_checks_the_radius_it_is_given_and_the_ring_s(tmp_path):
+    all_finished(tmp_path)
+    r = world_done(tmp_path, "overworld=4000")
+    assert r.returncode == 1 and "this world's last ring was radius 3000, not 4000" in r.stdout
+    assert world_done(tmp_path, "nether=1500").returncode == 2  # usage
+    ring_stamp(tmp_path / "mc_data", "the_end", radius=2500, ago=200)  # a hand-run Chunky task after the ring
+    r = world_done(tmp_path)
+    assert r.returncode == 1
+    assert "the_end: NOT done: Chunky's last task was radius 2000, but this world's last ring is radius 2500" \
+        in r.stdout
+
+
+@pytest.mark.parametrize("kw", [{"shape": "circle"}, {"pattern": "spiral"}, {"radius": "3000.5"},
+                                {"cx": "2000.0"}, {"cz": "-16.0"}, {"cx": ""}])
+def test_world_done_refuses_a_task_it_cannot_count(tmp_path, kw):
+    """A ring is a square centred on 0,0. A task centred elsewhere (a hand-run `chunky center`) at the same radius
+    leaves part of the border's square ungenerated."""
+    all_finished(tmp_path)
+    chunky_task(tmp_path / "mc_data", "overworld", 10 ** 9, **kw)
+    r = world_done(tmp_path)
+    assert r.returncode == 1 and "overworld: NOT done" in r.stdout and "not a world.sh ring" in r.stdout
+
+
+def test_world_done_total_is_chunky_s_formula():
+    """(2*ceil(r/16)+1)^2: Selection.radiusChunksX = ceil(radius/16f), diameter = 2r+1, RegionChunkIterator total =
+    diameter^2. 3000 is the case where the ceiling matters (187.5 -> 188)."""
+    for r, total in RINGS.values():
+        assert (2 * math.ceil(r / 16) + 1) ** 2 == total
+
+
+def test_world_done_reads_the_level_from_env(tmp_path):
+    (tmp_path / ".env").write_text("RCON_PASSWORD=x\nLEVEL=friends\n")
+    for dim, (_, total) in RINGS.items():
+        ring_stamp(tmp_path / "mc_data", dim, level="friends")
+        chunky_task(tmp_path / "mc_data", dim, total)
+    assert world_done(tmp_path).returncode == 0
+    (tmp_path / ".env").write_text("RCON_PASSWORD=x\n")  # default: world, which has no stamps
+    assert "no ring stamp (mc_data/world/" in world_done(tmp_path).stdout
+
+
+# ---- kit config: setup.sh, check.sh and host/bin take every instance value from kit.env ----------------------
+
+GOLDEN_VARS = HOST.parent / "kit" / "fixtures" / "asus-node" / "setup-vars.txt"  # the literals before the kit
+
+
+def kit_block(path):
+    return section(path, "# >>> kit config", "# <<< kit config")
+
+
+def run_kit_block(path, host_dir, names):
+    script = (f"set -euo pipefail\nHOST_DIR={host_dir}\n" + kit_block(path)
+              + f'for v in {" ".join(names)}; do printf "%s=%s\\n" "$v" "${{!v}}"; done\n')
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+@pytest.mark.skipif(not RECORD, reason=NO_RECORD)
+def test_setup_and_check_given_the_fixture_kit_env_hold_todays_constants(tmp_path):
+    """The kit gate for the host scripts: with kit/fixtures/asus-node.toml rendered, setup.sh's and check.sh's
+    instance variables are exactly the literals they held before the kit (setup-vars.txt, from master)."""
+    (tmp_path / "kit.env").write_text(kitrender.kit_env_text(kitrender.kit_env_values(kitconfig.load(FIXTURE))))
+    golden = GOLDEN_VARS.read_text()
+    want = dict(ln.split("=", 1) for ln in golden.splitlines())
+    r = run_kit_block(HOST / "setup.sh", tmp_path, list(want))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == golden
+    names = ["MC_USER", "MC_HOME", "WIRED", "WIFI", "WIRED_ADDR", "WIRED_GW", "WIRED_DNS"]
+    r = run_kit_block(HOST / "check.sh", tmp_path, names)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "".join(f"{k}={want[k]}\n" for k in names)
+
+
+def test_setup_and_check_hold_no_instance_literal():
+    """Every instance value comes from kit.env: no host name, user, connection, LAN or home path in either script,
+    for the example config and (where it is here) asus-node's, read from their files and never spelled here."""
+    for kit in [EXAMPLE] + ([FIXTURE] if RECORD else []):
+        cfg = kitconfig.load(kit)
+        literals = [cfg["host"]["name"], cfg["host"]["user"], cfg["net"]["wired_conn"], cfg["net"]["wifi_conn"],
+                    cfg["net"]["static_addr"].rsplit(".", 1)[0] + ".", "/home/"]
+        for script in ("setup.sh", "check.sh"):
+            text = (HOST / script).read_text()
+            for literal in literals:
+                assert literal not in text, (script, literal)
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+@pytest.mark.parametrize("broken,says", [("missing", "kit.env is missing"), ("no MC_USER", "has no MC_USER"),
+                                          ("empty MC_USER", "has no MC_USER")])  # set -u alone misses an empty one
+def test_setup_and_check_refuse_without_a_complete_kit_env(tmp_path, _kit_env, script, broken, says):
+    if broken != "missing":
+        new = "" if broken == "no MC_USER" else 'MC_USER=""\n'
+        (tmp_path / "kit.env").write_text(re.sub(r'^MC_USER=.*\n', new, _kit_env.read_text(), flags=re.M))
+    r = run_kit_block(HOST / script, tmp_path, ["MC_USER"])
+    assert r.returncode == 1
+    assert says in r.stdout + r.stderr and "MC_USER=" not in r.stdout
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+def test_setup_and_check_never_source_a_kit_env_line_render_would_not_write(tmp_path, _kit_env, script):
+    """setup.sh sources kit.env as root: a hand-edited line with a command substitution must be refused, unrun."""
+    pwned = tmp_path / "pwned"
+    (tmp_path / "kit.env").write_text(_kit_env.read_text() + f'MC_EXTRA="$(touch {pwned})"\n')
+    r = run_kit_block(HOST / script, tmp_path, ["MC_USER"])
+    assert r.returncode == 1 and not pwned.exists()
+    assert 'not KEY="value"' in r.stdout + r.stderr
+
+
+LINES = ['MC_TZ="x y/z.1"', 'MC_TZ=""', "# c", "", 'MC_TZ="$(id)"', 'MC_TZ="a`b`"', 'MC_TZ="a\\b"', 'MC_TZ="a"b"',
+         "MC_TZ=x", 'export MC_TZ="x"', 'mc_tz="x"', ' MC_TZ="x"', 'MC_TZ="x" ',
+         # the key allowlist: render's line shape, but a key render never writes (the shell would honour it)
+         'PATH="/tmp/evil"','IFS="x"', 'KIT_ENV="/tmp/x"', 'HOST_DIR="/tmp/x"',
+         'MC_NOPE="x"', 'MC_TZX="x"', 'XMC_TZ="x"', 'MC_TZ|PATH="x"']
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+def test_the_shell_kit_env_shape_check_matches_render(script, tmp_path, _kit_env):
+    """The check both scripts run before sourcing (run for real: the kit block with one line appended to the
+    fixture kit.env) accepts exactly the lines kit/render.py writes: KIT_ENV_LINE, for a key render writes."""
+    for line in LINES:
+        (tmp_path / "kit.env").write_text(_kit_env.read_text() + line + "\n")
+        r = run_kit_block(HOST / script, tmp_path, ["MC_USER"])
+        m = kitrender.KIT_ENV_LINE.fullmatch(line)
+        py_ok = line == "" or line.startswith("#") or bool(m and m.group(1) in KIT)
+        assert (r.returncode == 0) == py_ok, (script, line, r.stdout + r.stderr)
+        assert py_ok or 'not KEY="value"' in r.stdout + r.stderr, (script, line)
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+def test_the_shell_kit_key_allowlist_is_the_keys_render_writes(script):
+    """KIT_KEYS (setup.sh and check.sh) is a second statement of kit_env_values()'s keys: this test is its alarm."""
+    parts = re.findall(r"^KIT_KEYS\+?='([^']*)'$", kit_block(HOST / script), re.M)
+    assert len(parts) == 2 and "".join(parts).split("|") == list(KIT)
+
+
+@pytest.mark.parametrize("script,calls", [("setup.sh", 1), ("check.sh", 2)])
+def test_render_runs_without_writing_bytecode_into_the_checkout(script, calls):
+    """setup.sh runs as root (check.sh sometimes under sudo): a plain `python3 kit/render.py` would leave a
+    root-owned kit/__pycache__ in the kit user's checkout. setup.sh's call is also run for real below."""
+    found = re.findall(r'python3( -B)? "[^"]*kit/render\.py"', (HOST / script).read_text())
+    assert found == [" -B"] * calls
+
+
+def preflight(tmp_path, hostname, render_first=True, kit_toml_user=None, args=()):
+    """setup.sh from the top through the preflight, run for real against a scratch checkout: `id -u` says root and
+    `hostname` is stubbed; render --check runs for real."""
+    repo = tmp_path / "checkout"
+    shutil.copytree(HOST, repo / "host", ignore=shutil.ignore_patterns("kit.env", "rendered", "__pycache__"))
+    shutil.copytree(HOST.parent / "kit", repo / "kit", ignore=shutil.ignore_patterns("__pycache__"))
+    (repo / "kit.toml").write_text(EXAMPLE.read_text().replace(f'repo = "{KIT["MC_REPO"]}"', f'repo = "{repo}"'))
+    if render_first:
+        assert kitrender.main(["--repo", str(repo)]) == 0
+    if kit_toml_user:  # kit.toml changed after the render: kit.env and the units are now stale
+        (repo / "kit.toml").write_text((repo / "kit.toml").read_text().replace(f'user = "{KIT["MC_USER"]}"',
+                                                                               f'user = "{kit_toml_user}"'))
+    text = (repo / "host" / "setup.sh").read_text()
+    (repo / "host" / "preflight.sh").write_text(text[:text.index("CHANGED=0\n")] + 'echo "PREFLIGHT PASSED"\n')
+    path = stub_bin(tmp_path, id='[ "$1" = -u ] && { echo 0; exit 0; }; exec /usr/bin/id "$@"',
+                    hostname=f"echo {hostname}")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+    return subprocess.run(["bash", str(repo / "host" / "preflight.sh"), *args], capture_output=True, text=True,
+                          env={**env, "PATH": path})
+
+
+def test_setup_preflight_passes_on_the_kit_host_from_the_kit_repo(tmp_path):
+    r = preflight(tmp_path, KIT["MC_HOST_NAME"])
+    assert r.returncode == 0 and "PREFLIGHT PASSED" in r.stdout, r.stderr
+    assert not (tmp_path / "checkout" / "kit" / "__pycache__").exists()  # render ran as "root": no bytecode left
+
+
+def test_setup_refuses_a_host_kit_toml_does_not_name(tmp_path):
+    r = preflight(tmp_path, "some-other-box")
+    assert r.returncode == 1 and "PREFLIGHT PASSED" not in r.stdout
+    assert f"this is some-other-box, not {KIT['MC_HOST_NAME']} (kit.toml host.name" in r.stderr
+
+
+def test_setup_refuses_a_render_older_than_kit_toml(tmp_path):
+    r = preflight(tmp_path, KIT["MC_HOST_NAME"], kit_toml_user="someone")
+    assert r.returncode == 1 and "PREFLIGHT PASSED" not in r.stdout
+    assert "does not match kit.toml" in r.stderr and "host/kit.env: stale" in r.stderr
+
+
+def test_setup_refuses_before_any_render(tmp_path):
+    r = preflight(tmp_path, KIT["MC_HOST_NAME"], render_first=False)
+    assert r.returncode == 1 and "kit.env is missing" in r.stderr
+
+
+def test_setup_installs_kit_env_before_the_scripts_that_read_it():
+    step3 = section(HOST / "setup.sh", "# ---- 3. scripts + units", "# ---- 4. docker")
+    kit = step3.index('install_file "$KIT_ENV" /etc/mc-host/kit.env 640 "$MC_USER"')
+    assert kit < step3.index('for f in "${HOST_DIR}"/bin/mc-*; do')
+    assert step3.index("etc_mc_host_dir") < kit  # the dir exists, root:MC_USER 750, before the file goes in
+    assert '"${UNIT_SRC}"/*.service "${UNIT_SRC}"/*.timer' in step3 and '"${UNIT_SRC}"/*.d' in step3
+    assert "${HOST_DIR}/systemd" not in (HOST / "setup.sh").read_text()  # never the raw templates
+
+
+INSTALL_FILE = section(HOST / "setup.sh", "# install_file SRC DST MODE", "# nm_set CONN PROP VALUE")
+INSTALL_FILE_GROUP_GUARD = ' \\\n    && [ "$(stat -c %G "$dst")" = "$group" ]'
+
+
+def run_install_file(src, dst, mode, group, body=INSTALL_FILE):
+    """setup.sh's install_file verbatim, with the owner root mapped to whoever runs the test (install -o self and
+    a chgrp to one of the user's own groups need no root). -> (log lines, CHANGED)."""
+    script = ('set -euo pipefail\nlog() { printf "   %s\\n" "$*"; }\n' + body.replace("-o root ", '-o "$(id -un)" ')
+              + f'\ninstall_file {src} {dst} {mode} {group}\necho "CHANGED=$CHANGED"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def two_groups():
+    """The user's primary group, and another group the user is in (a chgrp to it needs no root)."""
+    want = subprocess.run(["id", "-gn"], capture_output=True, text=True, check=True).stdout.strip()
+    other = [g for g in subprocess.run(["id", "-Gn"], capture_output=True, text=True, check=True).stdout.split()
+             if g != want]
+    assert other, "this test needs a user in two groups (a kit user is: sudo, docker)"
+    return want, other[0]
+
+
+def test_install_file_reinstalls_a_file_whose_only_difference_is_its_group(tmp_path):
+    """kit.env is root:<kit user> 640 so the kit user's mc-heal/mc-maint/mc-netwatch can read it: one with the right
+    bytes and mode but the wrong group must be reinstalled, never reported unchanged."""
+    want, other = two_groups()
+    src, dst = tmp_path / "kit.env", tmp_path / "etc" / "kit.env"
+    src.write_text('MC_USER="someone"\n')
+    dst.parent.mkdir()
+    dst.write_text(src.read_text())
+    dst.chmod(0o640)
+    shutil.chown(dst, group=other)
+    out = run_install_file(src, dst, 640, want)
+    assert f"installed {dst}" in out and "CHANGED=1" in out
+    assert grp.getgrgid(dst.stat().st_gid).gr_name == want and oct(dst.stat().st_mode & 0o777) == "0o640"
+    out = run_install_file(src, dst, 640, want)  # and now it is the same: unchanged, nothing written
+    assert f"unchanged {dst}" in out and "CHANGED=0" in out
+
+
+def test_the_install_file_group_test_catches_its_mutant(tmp_path):
+    assert INSTALL_FILE.count(INSTALL_FILE_GROUP_GUARD) == 1, "stale or ambiguous mutation pattern"
+    want, other = two_groups()
+    src, dst = tmp_path / "kit.env", tmp_path / "etc" / "kit.env"
+    src.write_text('MC_USER="someone"\n')
+    dst.parent.mkdir()
+    dst.write_text(src.read_text())
+    dst.chmod(0o640)
+    shutil.chown(dst, group=other)
+    out = run_install_file(src, dst, 640, want, body=INSTALL_FILE.replace(INSTALL_FILE_GROUP_GUARD, ""))
+    assert f"unchanged {dst}" in out and "CHANGED=0" in out  # the mutant leaves the wrong group in place
+    assert grp.getgrgid(dst.stat().st_gid).gr_name == other
+
+
+def test_check_compares_the_installed_units_and_kit_env_with_the_render():
+    check = (HOST / "check.sh").read_text()
+    assert '"${UNIT_SRC}"/*.service "${UNIT_SRC}"/*.timer "${UNIT_SRC}"/*.d/*.conf' in check
+    assert "${HOST_DIR}/systemd" not in check
+    assert 'cmp -s "$KIT_ENV" /etc/mc-host/kit.env' in check
+    assert 'kit/render.py" --check --host-only' in check
+    # the rollout control: a render-owned key in .env that differs from kit.toml is live in compose now
+    env = section(HOST / "check.sh", 'env_out="$(', 'if cmp -s "$KIT_ENV" /etc/mc-host/kit.env')
+    assert 'kit/render.py" --check --env-only 2>&1)"; then' in env and "res FAIL" in env
+
+
+# ---- host/bin: kit_value ------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mod", ["hl", "mt", "nw"])
+def test_kit_value_reads_the_env_then_kit_env_and_never_guesses(mod, monkeypatch, tmp_path):
+    m = {"hl": hl, "mt": mt, "nw": nw}[mod]
+    assert m.kit_value("MC_REPO") == KIT["MC_REPO"]
+    monkeypatch.setenv("MC_REPO", "/srv/rehearsal")
+    assert m.kit_value("MC_REPO") == "/srv/rehearsal"
+    with pytest.raises(SystemExit, match="has no MC_NOPE"):
+        m.kit_value("MC_NOPE")
+    monkeypatch.setenv("MC_KIT_ENV", str(tmp_path / "absent"))
+    with pytest.raises(SystemExit, match="cannot read"):
+        m.kit_value("MC_USER")
+    (tmp_path / "evil").write_text('MC_USER="$(reboot)"\nMC_USER=bare\n')  # neither line is a kit.env line
+    monkeypatch.setenv("MC_KIT_ENV", str(tmp_path / "evil"))
+    with pytest.raises(SystemExit, match="has no MC_USER"):
+        m.kit_value("MC_USER")
+
+
+def _no_kit(monkeypatch, tmp_path):
+    monkeypatch.setenv("MC_KIT_ENV", str(tmp_path / "absent"))
+
+
+def test_mc_heal_refuses_without_kit_config_before_any_probe(monkeypatch, tmp_path):
+    _no_kit(monkeypatch, tmp_path)
+    monkeypatch.setattr(hl, "REPO", None)
+    monkeypatch.setattr(hl, "ARCHIVE", None)
+    monkeypatch.setattr(hl, "check", lambda now: pytest.fail("probed without a repo"))
+    for argv in ([], ["--status"]):
+        with pytest.raises(SystemExit, match="kit.env"):
+            hl.main(argv)
+
+
+def test_mc_heal_takes_its_repo_and_archive_from_kit_env(monkeypatch):
+    monkeypatch.setattr(hl, "REPO", None)
+    monkeypatch.setattr(hl, "ARCHIVE", None)
+    monkeypatch.setattr(hl, "check", lambda now: 0)
+    monkeypatch.setattr(hl.os, "geteuid", lambda: 1000)
+    assert hl.main([]) == 0
+    assert (hl.REPO, hl.ARCHIVE) == (KIT["MC_REPO"], os.path.join(KIT["MC_HOME"], "archive", "heal"))
+
+
+def test_mc_maint_refuses_without_kit_config_and_reads_it_when_there(monkeypatch, tmp_path):
+    monkeypatch.setattr(mt, "REPO", None)
+    monkeypatch.setattr(mt, "MC_USER", None)
+    monkeypatch.setattr(mt, "container_state", lambda: mt.STOPPED)
+    assert mt.main(["--idle"]) == 0
+    assert (mt.REPO, mt.MC_USER) == (KIT["MC_REPO"], KIT["MC_USER"])
+    monkeypatch.setattr(mt, "REPO", None)
+    _no_kit(monkeypatch, tmp_path)
+    monkeypatch.setattr(mt, "container_state", lambda: pytest.fail("judged without a repo"))
+    with pytest.raises(SystemExit, match="kit.env"):
+        mt.main(["--idle"])
+
+
+def test_mc_netwatch_needs_kit_config_to_act_but_not_to_probe(monkeypatch, tmp_path):
+    monkeypatch.setattr(nw, "WIRED", None)
+    monkeypatch.setattr(nw, "probe", lambda: (True, True, "ok"))
+    _no_kit(monkeypatch, tmp_path)
+    assert nw.main(["--probe"]) == 0  # setup.sh's arming check works before kit.env is installed
+    monkeypatch.setattr(nw, "load_state", lambda: pytest.fail("state read without config"))
+    with pytest.raises(SystemExit, match="kit.env"):
+        nw.main([])
+
+
+# ---- host bootstrap: optional network, linger, charge cap, stand-up (plan gaps #3, #11, #14) -----------------
+
+def kit_env_with(base, **values):
+    """The fixture's kit.env text with some values replaced (a key set to None is dropped)."""
+    text = base.read_text()
+    for k, v in values.items():
+        text = re.sub(rf'^{k}=.*\n', "" if v is None else f'{k}="{v}"\n', text, flags=re.M)
+    return text
+
+
+DHCP_WIRED = dict(MC_NET_MODE="dhcp", MC_WIRED_ADDR="", MC_WIRED_GW="", MC_WIRED_DNS="", MC_WIFI_CONN="")
+WIFI_ONLY = dict(MC_NET_MODE="dhcp", MC_WIRED_CONN="", MC_WIRED_ADDR="", MC_WIRED_GW="", MC_WIRED_DNS="",
+                 MC_WIFI_CONN="Home")
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+@pytest.mark.parametrize("values", [DHCP_WIRED, WIFI_ONLY])
+def test_a_dhcp_or_wifi_only_kit_env_is_accepted(tmp_path, _kit_env, script, values):
+    (tmp_path / "kit.env").write_text(kit_env_with(_kit_env, **values))
+    r = run_kit_block(HOST / script, tmp_path, ["MC_NET_MODE", "WIRED", "WIFI"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"WIFI={values['MC_WIFI_CONN']}\n" in r.stdout
+
+
+@pytest.mark.parametrize("values,says", [
+    (dict(MC_WIRED_CONN="", MC_WIFI_CONN=""), "names no network connection"),
+    (dict(MC_WIRED_GW=""), "net mode static but no MC_WIRED_GW"),
+    (dict(MC_NET_MODE="bonded"), "MC_NET_MODE=bonded"),
+    (dict(MC_WIFI_CONN=None), "has no MC_WIFI_CONN"),  # absent is not the same as empty
+    (dict(MC_CHARGE_CAP=None), "has no MC_CHARGE_CAP"),
+])
+def test_setup_refuses_a_network_it_cannot_act_on(tmp_path, _kit_env, values, says):
+    (tmp_path / "kit.env").write_text(kit_env_with(_kit_env, **values))
+    r = run_kit_block(HOST / "setup.sh", tmp_path, ["MC_USER"])
+    assert r.returncode == 1 and says in r.stderr and "MC_USER=" not in r.stdout
+
+
+def test_setup_takes_only_stand_up_as_an_argument(tmp_path):
+    r = preflight(tmp_path, KIT["MC_HOST_NAME"], args=("--standup",))
+    assert r.returncode == 2 and "usage: sudo bash host/setup.sh [--stand-up]" in r.stderr
+    assert "PREFLIGHT PASSED" not in r.stdout
+
+
+SETUP_HELPERS = (section(HOST / "setup.sh", "step() { printf", "# ---- preflight")
+                 + section(HOST / "setup.sh", "# nm_set CONN PROP VALUE", "# /etc/mc-host: root:MC_USER 750"))
+STEP2 = section(HOST / "setup.sh", "# ---- 2. resilient network", "# ---- 3. scripts + units")
+
+NMCLI_STUB = r'''echo "nmcli $*" >>"$CALLS"
+if [ "$1" = radio ]; then [ $# -eq 2 ] && echo enabled; exit 0; fi
+[ "$1" = -s ] && shift
+if [ "$1" = -g ]; then
+  [ -d "$NM/$5" ] || exit 10
+  cat "$NM/$5/$2" 2>/dev/null
+  exit 0
+fi
+exit 0'''
+
+
+def nm_state(tmp_path, conns):
+    """conns: {name: {prop: value}} as NetworkManager would report them."""
+    nm = tmp_path / "nm"
+    for name, props in conns.items():
+        (nm / name).mkdir(parents=True)
+        for prop, value in {"connection.id": name, **props}.items():
+            (nm / name / prop).write_text(value + "\n")
+    nm.mkdir(parents=True, exist_ok=True)
+    return nm
+
+
+STORED_WIFI = {"802-11-wireless-security.psk-flags": "0", "connection.permissions": "",
+               "802-11-wireless-security.psk": "hunter22", "connection.autoconnect": "yes",
+               "connection.autoconnect-priority": "10", "ipv4.route-metric": "600", "ipv4.method": "auto",
+               "connection.autoconnect-retries": "0"}
+WIRED_PROPS = {"connection.autoconnect": "yes", "connection.autoconnect-retries": "0",
+               "connection.autoconnect-priority": "100", "ipv4.route-metric": "100", "ipv4.method": "auto"}
+
+
+def run_step2(tmp_path, mode, wired, wifi, conns, rfkill="wlan unblocked"):
+    nm = nm_state(tmp_path, conns)
+    calls = tmp_path / "calls"
+    calls.touch()
+    path = stub_bin(tmp_path, nmcli=NMCLI_STUB, rfkill=f'echo "rfkill $*" >>"$CALLS"; [ "$1" = -n ] && echo "{rfkill}"; true')
+    script = ("set -euo pipefail\n" + SETUP_HELPERS + f"MC_NET_MODE={mode}\nWIRED='{wired}'\nWIFI='{wifi}'\n"
+              "wired_static() { echo WIRED_STATIC_CALLED; }\n" + STEP2
+              + 'echo "ABORTED=$ABORTED"; printf "NEXT: %s\\n" "${NEXT[@]}"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env={**os.environ, "PATH": path, "NM": str(nm), "CALLS": str(calls)})
+    assert r.returncode == 0, r.stderr
+    return r.stdout + r.stderr, calls.read_text()
+
+
+def test_step2_asus_node_shape_is_todays_static_plus_fallback(tmp_path):
+    out, calls = run_step2(tmp_path, "static", KIT["MC_WIRED_CONN"], KIT["MC_WIFI_CONN"],
+                           {KIT["MC_WIRED_CONN"]: WIRED_PROPS, KIT["MC_WIFI_CONN"]: STORED_WIFI})
+    assert "WIRED_STATIC_CALLED" in out and "ABORTED=0" in out
+    assert "rfkill -n -o TYPE,SOFT" in calls and "nmcli radio wifi" in calls
+    assert f"{KIT['MC_WIFI_CONN']}: unchanged" in out  # priority 10, metric 600 already
+
+
+def test_step2_dhcp_wired_only_touches_neither_wifi_nor_the_address(tmp_path):
+    out, calls = run_step2(tmp_path, "dhcp", "Wired connection 1", "", {"Wired connection 1": WIRED_PROPS})
+    assert "ABORTED=0" in out and "WIRED_STATIC_CALLED" not in out
+    assert "rfkill" not in calls and "radio" not in calls and "connection modify" not in calls
+    assert "ipv4 auto (DHCP" in out
+
+
+def test_step2_dhcp_refuses_to_silently_keep_a_static_address(tmp_path):
+    out, calls = run_step2(tmp_path, "dhcp", "Wired connection 1", "",
+                           {"Wired connection 1": {**WIRED_PROPS, "ipv4.method": "manual"}})
+    assert "ABORTED=1" in out and "net.mode is dhcp but 'Wired connection 1' has ipv4.method manual" in out
+    assert "ipv4.method" not in "".join(ln for ln in calls.splitlines(True) if "modify" in ln)  # never changed
+
+
+def test_step2_wifi_only_makes_the_wifi_come_up_forever(tmp_path):
+    out, calls = run_step2(tmp_path, "dhcp", "", "Home",
+                           {"Home": {**STORED_WIFI, "connection.autoconnect-retries": "-1"}}, rfkill="wlan blocked")
+    assert "ABORTED=0" in out and "WIRED_STATIC_CALLED" not in out
+    assert "rfkill unblock wifi" in calls
+    assert "nmcli connection modify Home connection.autoconnect-retries 0" in calls
+    assert "priority" not in calls and "route-metric" not in calls  # it is the link, not a fallback
+
+
+@pytest.mark.parametrize("conns,says", [
+    ({"Home": {**STORED_WIFI, "802-11-wireless-security.psk-flags": "1"}}, "not stored system-wide"),
+    ({"Home": {**STORED_WIFI, "connection.permissions": "user:kit"}}, "not stored system-wide"),
+    ({}, "no 'Home' connection exists"),
+])
+def test_step2_wifi_only_refuses_a_link_that_would_not_come_up_at_boot(tmp_path, conns, says):
+    out, calls = run_step2(tmp_path, "dhcp", "", "Home", conns)
+    assert "ABORTED=1" in out and says in out and "connection modify" not in calls
+    assert "hunter22" not in out  # the password is never printed
+
+
+def test_step2_a_fallback_without_a_stored_password_is_a_next_step_not_an_abort(tmp_path):
+    out, calls = run_step2(tmp_path, "dhcp", "Wired connection 1", "Home",
+                           {"Wired connection 1": WIRED_PROPS,
+                            "Home": {**STORED_WIFI, "802-11-wireless-security.psk-flags": "1"}})
+    assert "ABORTED=0" in out and "fallback NOT configured" in out and "NEXT: Wi-Fi fallback" in out
+
+
+CHECK_NET = section(HOST / "check.sh", "# ---- network", "# NetworkManager's address conflict detection")
+
+
+def run_check_net(tmp_path, mode, wired, wifi, conns, live_addr=""):
+    nm = nm_state(tmp_path, conns)
+    calls = tmp_path / "calls"
+    calls.touch()
+    path = stub_bin(tmp_path, nmcli=NMCLI_STUB, rfkill='echo "wlan unblocked"',
+                    ip=f'echo "2: eth0    inet {live_addr} brd x scope global eth0"')
+    script = (f'. {HOST}/lib/net.sh\nMC_NET_MODE={mode}\nWIRED=\'{wired}\'\nWIFI=\'{wifi}\'\n'
+              f'WIRED_ADDR={KIT["MC_WIRED_ADDR"]}\nWIRED_GW={KIT["MC_WIRED_GW"]}\nWIRED_DNS="{KIT["MC_WIRED_DNS"]}"\n'
+              'res() { printf "%s\\t%s\\n" "$1" "${*:2}"; }\n'
+              'expect() { if [ "$3" = "$2" ]; then res PASS "$1 = $3"; else res FAIL "$1 = $3 (want $2)"; fi; }\n'
+              'section() { :; }\n' + CHECK_NET)
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env={**os.environ, "PATH": path, "NM": str(nm), "CALLS": str(calls)})
+    return [tuple(ln.split("\t", 1)) for ln in r.stdout.splitlines() if "\t" in ln]
+
+
+def test_check_network_asus_node_shape_is_unchanged(tmp_path):
+    wired = {**WIRED_PROPS, "ipv4.method": "manual", "ipv4.addresses": KIT["MC_WIRED_ADDR"],
+             "ipv4.gateway": KIT["MC_WIRED_GW"], "ipv4.dns": KIT["MC_WIRED_DNS"].replace(" ", ","),
+             "GENERAL.DEVICES": "eth0"}
+    res = run_check_net(tmp_path, "static", KIT["MC_WIRED_CONN"], KIT["MC_WIFI_CONN"],
+                        {KIT["MC_WIRED_CONN"]: wired, KIT["MC_WIFI_CONN"]: STORED_WIFI}, live_addr=KIT["MC_WIRED_ADDR"])
+    assert [r for r in res if r[0] != "PASS"] == []
+    assert ("PASS", f"eth0 holds {KIT['MC_WIRED_ADDR']} (live: {KIT['MC_WIRED_ADDR']})") in res
+    assert any(r[1].startswith(f"{KIT['MC_WIFI_CONN']} fallback:") for r in res)
+
+
+def test_check_network_dhcp_wired_only(tmp_path):
+    res = run_check_net(tmp_path, "dhcp", "Wired connection 1", "", {"Wired connection 1": WIRED_PROPS})
+    assert [r for r in res if r[0] in ("FAIL", "WARN")] == []
+    assert ("PASS", "Wired connection 1: ipv4.method (kit.toml net.mode=dhcp) = auto") in res
+    assert ("INFO", "no Wi-Fi connection in kit.toml (no Wi-Fi fallback)") in res
+    res = run_check_net(tmp_path / "b", "dhcp", "Wired connection 1", "",
+                        {"Wired connection 1": {**WIRED_PROPS, "ipv4.method": "manual"}})
+    assert any(r[0] == "FAIL" and "ipv4.method" in r[1] for r in res)
+
+
+def test_check_network_wifi_only(tmp_path):
+    res = run_check_net(tmp_path, "dhcp", "", "Home", {"Home": STORED_WIFI})
+    assert [r for r in res if r[0] in ("FAIL", "WARN")] == []
+    assert any(r[0] == "PASS" and r[1].startswith("Home (the only link)") for r in res)
+    res = run_check_net(tmp_path / "b", "dhcp", "", "Home", {"Home": {**STORED_WIFI,
+                                                                       "connection.autoconnect-retries": "-1"}})
+    assert any(r[0] == "FAIL" and "(the only link)" in r[1] for r in res)
+    res = run_check_net(tmp_path / "c", "dhcp", "", "Home", {})
+    assert any(r[0] == "FAIL" and "only link" in r[1] for r in res)
+
+
+# ---- the charge cap: host/bin/mc-charge-cap, setup.sh step 13, check.sh --------------------------------------
+
+CHARGE_CAP = HOST / "bin" / "mc-charge-cap"
+
+
+def supplies(tmp_path, *names, writable=True):
+    ps = tmp_path / "power_supply"
+    ps.mkdir()
+    (ps / "AC").mkdir()
+    for n in names:
+        (ps / n).mkdir()
+        f = ps / n / "charge_control_end_threshold"
+        f.write_text("100\n")
+        if not writable:
+            f.chmod(0o444)
+    return ps
+
+
+def run_cap(ps, *args):
+    return subprocess.run(["bash", str(CHARGE_CAP), *args], capture_output=True, text=True,
+                          env={**os.environ, "MC_POWER_SUPPLY": str(ps), "MC_CHARGE_CAP_WAIT": "0"})
+
+
+def test_charge_cap_writes_every_battery_and_says_written_never_verified(tmp_path):
+    ps = supplies(tmp_path, "BAT0", "BAT1")
+    r = run_cap(ps, "80")
+    assert r.returncode == 0, r.stderr
+    assert (ps / "BAT0" / "charge_control_end_threshold").read_text() == "80\n"
+    assert (ps / "BAT1" / "charge_control_end_threshold").read_text() == "80\n"
+    lines = r.stdout.splitlines()
+    assert len(lines) == 2 and all(ln.startswith("written 80 to ") and "(not verified" in ln for ln in lines)
+
+
+def test_charge_cap_fails_loud_when_there_is_nothing_to_write(tmp_path):
+    r = run_cap(supplies(tmp_path), "80")
+    assert r.returncode == 1 and "NOT applied" in r.stderr and "written" not in r.stdout
+
+
+def test_charge_cap_fails_when_the_driver_refuses_the_write(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root writes a 0444 file")
+    r = run_cap(supplies(tmp_path, "BAT0", writable=False), "80")
+    assert r.returncode == 1 and "write FAILED" in r.stderr
+
+
+@pytest.mark.parametrize("arg", ["", "0", "101", "80%", "none", "8 0"])
+def test_charge_cap_refuses_a_bad_value_and_writes_nothing(tmp_path, arg):
+    ps = supplies(tmp_path, "BAT0")
+    r = run_cap(ps, arg)
+    assert r.returncode == 2 and (ps / "BAT0" / "charge_control_end_threshold").read_text() == "100\n"
+
+
+def test_charge_cap_unit_runs_the_installed_script_with_the_cap():
+    t = kitrender.render_template((SYSTEMD / "mc-charge-cap.service.in").read_text(), {**KIT, "MC_CHARGE_CAP": "80"})
+    assert "ExecStart=/usr/local/sbin/mc-charge-cap 80" in t.splitlines()
+    assert "Type=oneshot" in t and "WantedBy=multi-user.target" in t and "%" not in t.replace("%n", "")
+
+
+STEP13 = section(HOST / "setup.sh", "# ---- 13. charge cap", "# ---- 14. stand-up")
+SYSTEMCTL_STUB = r'''echo "systemctl $*" >>"$CALLS"
+case "$1" in
+  is-enabled) exit "${EN_RC:-1}" ;;
+  is-active) exit "${ACT_RC:-1}" ;;
+  restart) exit "${RESTART_RC:-0}" ;;
+esac
+exit 0'''
+
+
+def run_step13(tmp_path, cap, rendered=True, installed=False, cap_changed=0, **rc):
+    unit_dir, unit_src = tmp_path / "etc", tmp_path / "rendered"
+    unit_dir.mkdir()
+    unit_src.mkdir()
+    if rendered:
+        (unit_src / "mc-charge-cap.service").write_text("[Unit]\n")
+    if installed:
+        (unit_dir / "mc-charge-cap.service").write_text("[Unit]\n")
+    calls = tmp_path / "calls"
+    calls.touch()
+    path = stub_bin(tmp_path, systemctl=SYSTEMCTL_STUB, journalctl="echo 'written 80 to /sys/x (not verified)'")
+    script = ("set -euo pipefail\n" + SETUP_HELPERS + f"MC_CHARGE_CAP={cap}\nUNIT_DIR={unit_dir}\nUNIT_SRC={unit_src}\n"
+              f"cap_changed={cap_changed}\n" + STEP13 + 'echo "ABORTED=$ABORTED"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env={**os.environ, "PATH": path, "CALLS": str(calls), **{k: str(v) for k, v in rc.items()}})
+    assert r.returncode == 0, r.stderr
+    return r.stdout + r.stderr, calls.read_text(), unit_dir
+
+
+def test_step13_no_cap_is_a_no_op_as_on_asus_node(tmp_path):
+    out, calls, _ = run_step13(tmp_path, "none", rendered=False)
+    assert "unchanged: no charge cap configured" in out and calls == ""
+
+
+def test_step13_a_dropped_cap_removes_the_unit(tmp_path):
+    out, calls, unit_dir = run_step13(tmp_path, "none", rendered=False, installed=True)
+    assert "systemctl disable --now mc-charge-cap.service" in calls and "systemctl daemon-reload" in calls
+    assert not (unit_dir / "mc-charge-cap.service").exists()
+
+
+def test_step13_enables_and_writes_now_and_says_written_not_verified(tmp_path):
+    out, calls, _ = run_step13(tmp_path, "80")
+    assert "systemctl enable mc-charge-cap.service" in calls and "systemctl restart mc-charge-cap.service" in calls
+    assert "WRITTEN, not verified" in out and "ABORTED=0" in out
+
+
+@pytest.mark.parametrize("cap_changed,restarts", [(0, False), (1, True)])
+def test_step13_rewrites_when_the_cap_unit_changed_and_not_otherwise(tmp_path, cap_changed, restarts):
+    out, calls, _ = run_step13(tmp_path, "80", cap_changed=cap_changed, EN_RC=0, ACT_RC=0)
+    assert ("systemctl restart mc-charge-cap.service" in calls) == restarts
+    assert ("unchanged mc-charge-cap.service" in out) != restarts
+
+
+@pytest.mark.parametrize("kw,says", [({"RESTART_RC": 1}, "mc-charge-cap.service failed"),
+                                     ({"rendered": False}, "was not rendered")])
+def test_step13_a_cap_that_cannot_be_written_aborts(tmp_path, kw, says):
+    out, _, _ = run_step13(tmp_path, "80", **kw)
+    assert "ABORTED=1" in out and says in out and "WRITTEN" not in out
+
+
+CHECK_CAP = section(HOST / "check.sh", "# >>> charge cap", "# <<< charge cap")
+
+
+@pytest.mark.parametrize("cap,installed,show,want", [
+    ("none", False, "", ("INFO", "no battery charge cap configured")),
+    ("none", True, "", ("FAIL", "but")),
+    ("80", True, "enabled|active|success", ("PASS", "charge cap 80 WRITTEN this boot")),
+    ("80", True, "enabled|active|failed", ("FAIL", "not written this boot")),
+    ("80", True, "disabled|inactive|success", ("FAIL", "not written this boot")),
+])
+def test_check_reports_the_cap_written_never_verified(tmp_path, cap, installed, show, want):
+    unit_dir = tmp_path / "etc"
+    unit_dir.mkdir()
+    if installed:
+        (unit_dir / "mc-charge-cap.service").write_text("[Unit]\n")
+    en, act, result = (show or "x|x|x").split("|")
+    path = stub_bin(tmp_path, systemctl=f'case "$*" in is-enabled*) echo {en} ;; *ActiveState*) echo {act} ;; '
+                                        f'*Result*) echo {result} ;; esac')
+    script = (f"MC_CHARGE_CAP={cap}\nUNIT_DIR={unit_dir}\n" 'res() { printf "%s\\t%s\\n" "$1" "${*:2}"; }\n' + CHECK_CAP)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                         env={**os.environ, "PATH": path}).stdout
+    st, msg = out.strip().split("\t", 1)
+    assert st == want[0] and want[1] in msg
+    assert "verified" not in msg.replace("not verified", "")  # never claims it was checked
+
+
+# ---- linger (step 12) and stand-up (step 14) ------------------------------------------------------------------
+
+STEP12 = section(HOST / "setup.sh", "# ---- 12. linger", "# ---- 13. charge cap")
+
+
+@pytest.mark.parametrize("lingering", [True, False])
+def test_step12_enables_linger_once(tmp_path, lingering):
+    linger = tmp_path / "linger"
+    linger.mkdir()
+    if lingering:
+        (linger / "kit").touch()
+    calls = tmp_path / "calls"
+    calls.touch()
+    path = stub_bin(tmp_path, loginctl='echo "loginctl $*" >>"$CALLS"')
+    script = "set -euo pipefail\n" + SETUP_HELPERS + f"MC_USER=kit\nLINGER_DIR={linger}\n" + STEP12
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env={**os.environ, "PATH": path, "CALLS": str(calls)})
+    assert r.returncode == 0
+    assert calls.read_text() == ("" if lingering else "loginctl enable-linger kit\n")
+
+
+CHECK_LINGER = section(HOST / "check.sh", "# >>> linger", "# <<< linger")
+
+
+@pytest.mark.parametrize("lingering,want", [(True, ["PASS", "linger on for kit"]),
+                                            (False, ["FAIL", "linger off for kit (sudo bash host/setup.sh, step 12)"])])
+def test_check_reports_linger_from_the_logind_record(tmp_path, lingering, want):
+    linger = tmp_path / "linger"
+    linger.mkdir()
+    (linger / "someone-else").touch()  # another user's record is not the kit user's
+    if lingering:
+        (linger / "kit").touch()
+    script = f"MC_USER=kit\nLINGER_DIR={linger}\n" 'res() { printf "%s\\t%s\\n" "$1" "${*:2}"; }\n' + CHECK_LINGER
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+    assert out.strip().split("\t", 1) == want
+
+
+STEP14 = section(HOST / "setup.sh", "# ---- 14. stand-up", "# ---- next steps")
+
+
+def standup_repo(tmp_path, world=True, pack=True, backup=True, level="world"):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copy(HOST.parent / "docker-compose.yml", repo / "docker-compose.yml")
+    (repo / ".env").write_text(f"RCON_PASSWORD=x\nLEVEL={level}\n")
+    if world:
+        (repo / "mc_data" / level).mkdir(parents=True)
+        (repo / "mc_data" / level / "level.dat").write_bytes(b"\x1f\x8b")
+    pack_file = re.search(r'MODRINTH_MODPACK: "/pack/([^"]+)"', (repo / "docker-compose.yml").read_text()).group(1)
+    if pack:
+        (repo / "dist").mkdir()
+        (repo / "dist" / pack_file).write_bytes(b"PK")
+    if backup:
+        (repo / "backups").mkdir()
+        (repo / "backups" / "world-2026-10-14_0400.tar.gz").write_bytes(b"\x1f\x8b")
+    return repo
+
+
+@pytest.mark.parametrize("missing,says", [({}, ""), ({"world": False}, "no world at mc_data/w2/level.dat"),
+                                          ({"pack": False}, "is missing (python3 pack/build.py)"),
+                                          ({"backup": False}, "run the first deploy/backup.sh")])
+def test_standup_refusal(tmp_path, missing, says):
+    repo = standup_repo(tmp_path, level="w2", **missing)
+    out = subprocess.run(["bash", "-c", f". {HOST}/lib/standup.sh; standup_refusal {repo}"], capture_output=True,
+                         text=True).stdout
+    assert (says in out) if says else out == ""
+
+
+def test_standup_refusal_reads_a_custom_packs_override(tmp_path):
+    repo = standup_repo(tmp_path)  # Vanilla Extended's pack is in dist/, but compose runs the override's
+    (repo / "docker-compose.override.yml").write_text(CUSTOM_OVERRIDE)
+    run = ["bash", "-c", f". {HOST}/lib/standup.sh; standup_refusal {repo}"]
+    out = subprocess.run(run, capture_output=True, text=True).stdout
+    assert "the pack compose names (dist/sky-isles-1.2.0-ch1.mrpack) is missing" in out
+    (repo / "dist" / "sky-isles-1.2.0-ch1.mrpack").write_bytes(b"PK")
+    assert subprocess.run(run, capture_output=True, text=True).stdout == ""
+
+
+def run_step14(tmp_path, stand_up, prelude="", **repo_kw):
+    """PRELUDE runs between setup.sh's helpers (ABORTED=0) and step 14: the earlier steps' outcome."""
+    repo = standup_repo(tmp_path, **repo_kw)
+    calls = tmp_path / "calls"
+    calls.touch()
+    path = stub_bin(tmp_path, systemctl=SYSTEMCTL_STUB)
+    script = ("set -euo pipefail\n" + SETUP_HELPERS + prelude + f". {HOST}/lib/standup.sh\nSTAND_UP={stand_up}\n"
+              f"REPO={repo}\n" + STEP14 + 'echo "ABORTED=$ABORTED"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env={**os.environ, "PATH": path, "CALLS": str(calls)})
+    assert r.returncode == 0, r.stderr
+    return r.stdout + r.stderr, calls.read_text()
+
+
+def test_plain_setup_never_arms_the_server(tmp_path):
+    out, calls = run_step14(tmp_path, 0)
+    assert calls == "" and "14. stand-up" not in out
+
+
+def test_stand_up_arms_both_units_once_everything_exists(tmp_path):
+    out, calls = run_step14(tmp_path, 1)
+    assert "systemctl enable --now mc-server.service" in calls and "systemctl enable --now mc-backup.timer" in calls
+    assert "ABORTED=0" in out
+
+
+def test_stand_up_is_refused_before_the_first_backup(tmp_path):
+    out, calls = run_step14(tmp_path, 1, backup=False)
+    assert "ABORTED=1" in out and "stand-up refused" in out and "enable" not in calls
+
+
+@pytest.mark.parametrize("earlier", [
+    "static IP: NOT confirmed; mc-net-rollback restores the previous settings",
+    "Wi-Fi: Home is this laptop's only link and its password is not stored system-wide",
+    "mc_data is (or runs through) a symlink; refusing to follow it",
+    "mc-charge-cap.service failed",
+])
+def test_stand_up_is_refused_after_an_earlier_step_aborted(tmp_path, earlier):
+    """A complete repo (world, pack, backup) is still not armed when an earlier step of the same run aborted."""
+    out, calls = run_step14(tmp_path, 1, prelude=f'abort_step "{earlier}"\n')
+    assert calls == "" and "enable" not in calls
+    assert "stand-up refused: an earlier step aborted" in out and "ABORTED=1" in out
+
+
+def test_setup_never_enables_the_server_outside_step_14():
+    """The code outside step 14 (comments and the printed next-step text aside) never names the stand-up units in an
+    enable, so plain setup.sh cannot arm them."""
+    rest = (HOST / "setup.sh").read_text().replace(STEP14, "")
+    code = [ln for ln in rest.splitlines() if not ln.lstrip().startswith(("#", "next ", "log "))]
+    assert not [ln for ln in code if re.search(r"systemctl[^\n]*\benable\b", ln) and re.search(r"mc-(server|backup)", ln)]
+    assert any("systemctl enable --now" in ln for ln in code)  # the pattern still matches the other enables
+    assert "for u in mc-server.service mc-backup.timer; do" in STEP14 and 'if [ "$STAND_UP" = 1 ]; then' in STEP14
+
+
+# ---- mc-netwatch on a Wi-Fi-only laptop --------------------------------------------------------------------------
+
+def test_netwatch_brings_up_the_wifi_when_there_is_no_wired_connection(monkeypatch, tmp_path, _kit_env):
+    f = tmp_path / "kit.env"
+    f.write_text(kit_env_with(_kit_env, MC_WIRED_CONN="", MC_WIFI_CONN="Home"))
+    monkeypatch.setenv("MC_KIT_ENV", str(f))
+    monkeypatch.setattr(nw, "WIRED", None)
+    monkeypatch.setattr(nw, "probe", lambda: (False, False, "down"))
+    monkeypatch.setattr(nw, "load_state", lambda: {})
+    monkeypatch.setattr(nw, "save_state", lambda s: None)
+    monkeypatch.setattr(nw, "decide", lambda now, gw, ts, st: (nw.WIRED_UP, {"first_failure": now}, None))
+    ran = []
+    monkeypatch.setattr(nw, "run", lambda cmd, t: ran.append(cmd) or (0, "", ""))
+    assert nw.main([]) == 0
+    assert ran == [["nmcli", "connection", "up", "id", "Home"]]
+
+
+def test_netwatch_refuses_a_kit_env_with_no_connection(monkeypatch, tmp_path, _kit_env):
+    f = tmp_path / "kit.env"
+    f.write_text(kit_env_with(_kit_env, MC_WIRED_CONN="", MC_WIFI_CONN=""))
+    monkeypatch.setenv("MC_KIT_ENV", str(f))
+    monkeypatch.setattr(nw, "WIRED", None)
+    monkeypatch.setattr(nw, "probe", lambda: (False, False, "down"))
+    monkeypatch.setattr(nw, "load_state", lambda: pytest.fail("state read without a connection to act on"))
+    with pytest.raises(SystemExit, match="names no network connection"):
+        nw.main([])
+
+
+# ---- 7. alerts: a kit's staged webhook (discord/bootstrap.py webhook --apply) ------------------------------------
+
+STEP7 = section(HOST / "setup.sh", "# ---- 7. alerts", "# ---- 8. ssh")
+HOOK = "https://discord.com/api/webhooks/1500000000000000006/FakeHookToken_0123-abc"
+
+
+def run_step7(tmp_path):
+    """Step 7 verbatim, with /etc/mc-host in tmp_path and root ownership mapped to whoever runs the test. runuser is a
+    recording stub that runs the command as this same user (the test cannot switch users)."""
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    etc = tmp_path / "etc"
+    etc.mkdir(exist_ok=True)
+    body = (STEP7.replace("/etc/mc-host/webhook", str(etc / "webhook")).replace("-o root ", '-o "$MC_USER" ')
+            .replace('chown "root:${MC_USER}"', 'chown "${MC_USER}:${MC_USER}"')
+            .replace('= "root:${MC_USER} 640"', '= "${MC_USER}:${MC_USER} 640"'))
+    path = stub_bin(tmp_path, runuser=f'echo "$*" >> {tmp_path}/runuser.log; [ "$1" = -u ] && shift 2; '
+                                      '[ "$1" = -- ] && shift; exec "$@"')
+    script = (f'set -euo pipefail\nMC_USER={user}\nMC_HOME={tmp_path}/home\nMC_HOST_NAME=box\nNEXT=()\nABORTED=0\n'
+              'step() { printf "== %s\\n" "$*"; }\nlog() { printf "   %s\\n" "$*"; }\n'
+              'warn() { printf "   WARNING: %s\\n" "$*"; }\nnext() { NEXT+=("$*"); }\n'
+              'abort_step() { warn "ABORTED: $*"; next "$*"; ABORTED=1; }\netc_mc_host_dir() { :; }\n'
+              + body + '\necho "ABORTED=$ABORTED"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={**os.environ, "PATH": path})
+    assert r.returncode == 0, r.stderr
+    return r.stdout, etc / "webhook"
+
+
+def stage_hook(tmp_path, text=HOOK + "\n"):
+    f = tmp_path / "home" / ".config" / "mc-kit" / "webhook"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+    f.chmod(0o600)
+    return f
+
+
+def test_step7_installs_a_staged_webhook_as_the_kit_user_then_is_unchanged(tmp_path):
+    staged = stage_hook(tmp_path)
+    out, installed = run_step7(tmp_path)
+    assert "ABORTED=0" in out and "installed " in out and "FakeHookToken" not in out
+    assert installed.read_text() == HOOK + "\n" and oct(installed.stat().st_mode & 0o777) == "0o640"
+    assert not staged.exists()  # one home for the URL
+    log = (tmp_path / "runuser.log").read_text()
+    assert f"cat -- {staged}" in log and f"rm -f -- {staged}" in log  # read and removed as the kit user
+    out, _ = run_step7(tmp_path)
+    assert "unchanged " in out and "installed " not in out and "ABORTED=0" in out
+
+
+def test_step7_replaces_a_different_installed_webhook(tmp_path):
+    stage_hook(tmp_path)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "webhook").write_text("https://discord.com/api/webhooks/1/old\n")
+    out, installed = run_step7(tmp_path)
+    assert installed.read_text() == HOOK + "\n" and "installed " in out
+
+
+def test_step7_with_the_same_url_already_installed_only_removes_the_stage(tmp_path):
+    staged = stage_hook(tmp_path)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "webhook").write_text(HOOK + "\n")
+    out, _ = run_step7(tmp_path)
+    assert "already installed" in out and "installed /" not in out and not staged.exists()
+
+
+@pytest.mark.parametrize("text", ["not a url\n", HOOK + "\n" + HOOK + "\n", HOOK.replace("1500000000000000006", "x"),
+                                  "https://evil.example/api/webhooks/1500000000000000006/abc\n", "",
+                                  HOOK + " $(id)\n", HOOK + "/extra\n"])
+def test_step7_refuses_a_staged_file_that_is_not_one_webhook_url(tmp_path, text):
+    staged = stage_hook(tmp_path, text)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "webhook").write_text("https://discord.com/api/webhooks/1/old\n")
+    out, installed = run_step7(tmp_path)
+    assert "ABORTED=1" in out and "nothing installed" in out
+    assert installed.read_text() == "https://discord.com/api/webhooks/1/old\n" and staged.exists()
+
+
+def test_step7_never_follows_a_staged_link(tmp_path):
+    """A link to a file holding a valid URL (it could be any root-only file) is refused, not copied."""
+    secret = tmp_path / "root-only"
+    secret.write_text(HOOK + "\n")
+    staged = tmp_path / "home" / ".config" / "mc-kit" / "webhook"
+    staged.parent.mkdir(parents=True)
+    staged.symlink_to(secret)
+    out, installed = run_step7(tmp_path)
+    assert "ABORTED=1" in out and not installed.exists() and secret.exists()
+
+
+def test_step7_without_a_staged_file_is_todays_step(tmp_path):
+    out, installed = run_step7(tmp_path)
+    assert "ABORTED=0" in out and "missing: alerts are logged to the journal only" in out
+    assert not installed.exists()
+    assert not (tmp_path / "runuser.log").exists()  # nothing read, nothing removed
+
+
+def test_step7_stages_where_bootstrap_writes():
+    """setup.sh and discord/bootstrap.py name the same staged path, under kit.toml host.home."""
+    sys.path.insert(0, str(HOST.parent / "discord"))
+    try:
+        import bootstrap
+    finally:
+        sys.path.remove(str(HOST.parent / "discord"))
+    assert f'WEBHOOK_STAGED="${{MC_HOME}}/{bootstrap.STAGED_REL.as_posix()}"' in STEP7
+    regex = re.search(r"WEBHOOK_URL_RE='\^([^']+)\$'", STEP7).group(1)
+    assert regex == bootstrap.WEBHOOK_URL.pattern

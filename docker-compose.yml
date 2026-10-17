@@ -32,27 +32,32 @@ services:
       # ve-commands (mod/README.md): not on Modrinth, so itzg copies it from ./extras on every start. A NEW
       # filename per build: itzg's copy treats a same-size file as up to date, and renaming drops the old copy.
       MODS: "/extras/ve-commands-1.0.4.jar"
-      MEMORY: "8G"             # measured on asus-node (15 GiB): 10G left ~760 MiB free (JVM off-heap > estimate); 8G leaves ~5G headroom
+      MEMORY: "${MEMORY:-8G}"  # kit.toml server.memory. Measured on asus-node (15 GiB): 10G left ~760 MiB free (JVM off-heap > estimate); 8G leaves ~5G headroom
       USE_AIKAR_FLAGS: "true"  # standard G1GC tuning for modded servers
       # An OOM'd JVM otherwise hangs forever and `restart` never fires (2 h dead, 2026-10-01): exit instead, and
       # Docker restarts it in ~40 s. Appended to the Aikar flags (seen in `docker top`). No heap dump: 8 GB would
       # land on the world's disk. Hangs that are not an OOM are host/bin/mc-heal's.
       JVM_XX_OPTS: "-XX:+ExitOnOutOfMemoryError"
       ENABLE_RCON: "true"      # used in-container by `rcon-cli` (backups, whitelist); port NOT published
-      DIFFICULTY: "hard"
-      VIEW_DISTANCE: "8"
-      SIMULATION_DISTANCE: "6"
-      MAX_PLAYERS: "12"
+      DIFFICULTY: "${DIFFICULTY:-hard}"
+      VIEW_DISTANCE: "${VIEW_DISTANCE:-8}"
+      SIMULATION_DISTANCE: "${SIMULATION_DISTANCE:-6}"
+      MAX_PLAYERS: "${MAX_PLAYERS:-12}"
       ENABLE_WHITELIST: "true"
       ENFORCE_WHITELIST: "true"
       MOTD: "Vanilla Extended · pack 1.0.2"   # = mods.toml [pack] version, so an old pack shows before the click
       SPAWN_PROTECTION: "0"    # friends build at spawn too; whitelist-only server, no griefers to fence out
-      TZ: "America/Toronto"    # log and crash-report times match the friends' clock
+      TZ: "${TZ:-America/Toronto}"  # = the host TZ (kit.toml host.tz): logs, crash reports and the timers agree
       # mc-server-runner (the image's PID 1) SIGKILLs the JVM this many seconds after sending `stop`
       # (image default 60). Budget order, inner to outer: STOP_DURATION 110 < stop_grace_period /
       # `stop -t` 120 < TimeoutStopSec 180 (mc-server.service and every docker-<id>.scope).
       STOP_DURATION: "110"
       # RCON_PASSWORD and LEVEL (world directory name) come from env_file (.env).
+      # The ${KEY:-default} values above come from .env, written by kit/render.py from kit.toml; each default is
+      # asus-node's value. .env is also this service's env_file, so each key reaches the container under the same
+      # name with the same value. Optional SEED and OPS travel in .env only (itzg reads them from the env), and
+      # only when kit.toml sets them. A variable exported in the calling shell beats .env (compose's rule):
+      # mc-server.service runs with systemd's clean environment.
     # Game port reachable on LAN + tailnet only — never port-forward publicly;
     # friends connect through a Tailscale node share (AGENTS.md "Access").
     ports: ["25565:25565"]
@@ -79,7 +84,7 @@ services:
       - path: .env.bridge   # DISCORD_BRIDGE_TOKEN + DISCORD_GUILD_ID, mode 600 (.env.bridge.example)
         format: raw
         required: false     # a missing file must not abort `up -d` for minecraft; the bridge itself fails loudly
-    volumes:   # both created as mm-mike by host/setup.sh step 10; never create_host_path: false
+    volumes:   # both created as kit.toml host.user by host/setup.sh step 10; never create_host_path: false
       - ./mc_data/mcve/out:/mcve/out:ro
       - ./mc_data/mcve/in:/mcve/in
       # The egress fence's stamp dir, read-only: bridge.py refuses to start without bridge-fence.ok, on EVERY
@@ -96,7 +101,7 @@ services:
     tmpfs: ["/tmp:size=16m"]   # the default is half the host's RAM
     # Root only long enough to hand a root-owned /mcve/in to 1000, then uid 1000 with an empty bounding set
     # (bridge/entrypoint.sh).
-    # KILL lets tini signal the uid-1000 child. (no-new-privileges breaks exec under snap Docker on the workstation.)
+    # KILL lets tini signal the uid-1000 child. (no-new-privileges breaks exec under snap Docker.)
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID, SETPCAP, KILL]
     restart: unless-stopped

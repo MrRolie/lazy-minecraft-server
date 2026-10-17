@@ -1,0 +1,24 @@
+# The instance-only paths: what belongs to the friends' live server (asus-node) or to the operator's working notes,
+# and not to the kit. A copy of this repo for anyone else (a public snapshot, a friend's fork) drops exactly these.
+# kit/instance-check.sh proves that the rest still passes its tests and names none of the instance's values
+# (kit/fixtures/asus-node.values). One path per line, relative to the repo root; a directory ends in /. Comments and
+# blank lines are ignored. kit/test_instance_paths.py checks that the lines name tracked paths: all of them, or none.
+
+# asus-node's record: the runbook part only it needs, its kit.toml, the files it reproduces byte for byte, and the
+# values a copy must not carry
+docs/instance/asus-node.md
+kit/fixtures/asus-node.toml
+kit/fixtures/asus-node/
+kit/fixtures/asus-node.values
+
+# asus-node's guild: its friends' story, the intents behind it, its #setup as posted, and its one-off posts
+# (discord/sync.py asus_node_only)
+discord/content/setup.md
+discord/content/story.md
+discord/content/story-intents.md
+discord/posts/
+
+# the operator's working notes: the pack's design history, the kit's plan and its research. No kept doc needs them.
+docs/direction/
+docs/kit/research/
+docs/kit/2026-10-14_kit-plan.md

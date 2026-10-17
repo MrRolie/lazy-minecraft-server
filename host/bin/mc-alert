@@ -1,11 +1,11 @@
 #!/usr/bin/python3
-"""mc-alert: best-effort Discord webhook alert from asus-node.
+"""mc-alert: best-effort Discord webhook alert from the game host.
 
     mc-alert "<message>"     post a message
     mc-alert --unit <unit>   post "<unit> failed on <host>" plus that unit's last journal lines
                              (what mc-alert@.service runs, via OnFailure=mc-alert@%n.service)
 
-The webhook URL is read from /etc/mc-host/webhook (root:mm-mike 0640). It is a secret: it never
+The webhook URL is read from /etc/mc-host/webhook (root:<kit user> 0640). It is a secret: it never
 lands in the repo and is never logged. Alerts are best-effort: a missing file, a bad URL or a
 network error is logged and the exit code is still 0, so an alert can never break its caller.
 python3 stdlib only (curl is not in the Ubuntu 24.04 desktop manifest).
@@ -106,7 +106,7 @@ def unit_journal(unit):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Best-effort Discord alert from asus-node.")
+    ap = argparse.ArgumentParser(description="Best-effort Discord alert from the game host.")
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("message", nargs="?", help="alert text")
     group.add_argument("--unit", help="report this unit as failed, with its last journal lines")

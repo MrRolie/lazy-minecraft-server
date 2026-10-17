@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # mc-bridge-fence: the host-side egress fence for the Discord bridge's network (br-mcve).
 #
-# WHY (rv2, proven on the workstation 2026-10-01): from the bridge container, the host-published game port answered on the
-# Docker gateway and on the host's LAN IP. The bridge needs the Internet (Discord). A compromised bridge could
-# therefore relay a stranger to 25565, and also whitelist that stranger, which gets around the Tailscale-only
-# access rule. The bridge needs nothing on this host, this LAN or the tailnet.
+# WHY (rv2, proven on the dev machine 2026-10-01): from the bridge container, the host-published game port
+# answered on the Docker gateway and on the host's LAN IP. The bridge needs the Internet (Discord). A compromised
+# bridge could therefore relay a stranger to 25565, and also whitelist that stranger, which gets around the
+# Tailscale-only access rule. The bridge needs nothing on this host, this LAN or the tailnet.
 #
 # HOW: raw-table PREROUTING, in-interface br-mcve (fixed in docker-compose.yml), destination in any loopback,
 # private, CGNAT (tailnet) or link-local range -> DROP. Raw sits before routing and DNAT, so this one anchor
 # covers both host-directed traffic (INPUT, including docker-proxy) and forwarded traffic (published ports
 # DNAT'd to a container IP, LAN, tailnet).
 # - Not DOCKER-USER: on a Tailscale host, FORWARD jumps to ts-forward FIRST, and its `-o tailscale0 -j ACCEPT`
-#   accepts tailnet-bound packets before DOCKER-USER ever sees them (seen on the workstation).
+#   accepts tailnet-bound packets before DOCKER-USER ever sees them (seen on the dev machine).
 # - Neither docker (which appends per-container rules to raw PREROUTING) nor tailscale reorders or flushes
 #   this chain.
 # - IPv6 from the bridge is dropped wholesale; the network is IPv4-only.

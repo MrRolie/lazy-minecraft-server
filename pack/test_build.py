@@ -4,12 +4,24 @@ import json
 import os
 import re
 import subprocess
+import sys
 import zipfile
 
 import pytest
 
 import build
 
+# The tests' kit.toml: a made-up kit instance. asus-node's own record (kit/fixtures/asus-node.toml) is read only by
+# the tests about that server, which skip where a copy dropped it (kit/INSTANCE-PATHS; kit/instance.py decides, and
+# part of a record raises, so a damaged live tree fails instead of skipping).
+EXAMPLE = build.ROOT / "kit" / "fixtures" / "example.toml"
+FIXTURE = build.ROOT / "kit" / "fixtures" / "asus-node.toml"
+build._kitconfig()  # puts kit/ on sys.path
+import instance  # noqa: E402
+
+NO_RECORD = instance.NO_RECORD
+RECORD = instance.record()
+ADDR = build.server_address(EXAMPLE)
 B = {"minecraft": "26.1.2", "fabricloader": "0.19.5", "java": "25"}
 
 
@@ -430,22 +442,22 @@ def _nbt(data):
 
 def test_servers_dat_lists_the_server():
     pack, _ = build.load_manifest((build.HERE / "mods.toml").read_text())
-    entries = build.mrpack_entries(pack, [], {}, "x", build.HERE / "overrides")
+    entries = build.mrpack_entries(pack, [], {}, "x", build.HERE / "overrides", ADDR)
     root = _nbt(entries["client-overrides/servers.dat"])
-    assert root == {"servers": [{"name": "Vanilla Extended", "ip": build.SERVER_ADDRESS, "hidden": 0}]}
+    assert root == {"servers": [{"name": "Vanilla Extended", "ip": ADDR, "hidden": 0}]}
     assert build.lint_entries(entries) == []
 
 
 def test_servers_dat_bytes_are_stable():  # the no-rewrite rule: same version -> same bytes
-    a = build.servers_dat("Vanilla Extended", build.SERVER_ADDRESS)
-    assert a == build.servers_dat("Vanilla Extended", build.SERVER_ADDRESS)
+    a = build.servers_dat("Vanilla Extended", ADDR)
+    assert a == build.servers_dat("Vanilla Extended", ADDR)
     assert a[:3] == b"\x0a\x00\x00" and a.endswith(b"\x00\x00")
 
 
 @pytest.mark.parametrize("bad", ["a\0b", "\U0001F600"])
 def test_servers_dat_refuses_strings_java_encodes_differently(bad):
     with pytest.raises(ValueError):
-        build.servers_dat(bad, build.SERVER_ADDRESS)
+        build.servers_dat(bad, ADDR)
 
 
 # The length prefix is an unsigned short of encoded BYTES: 0xFFFF fits, one more byte must refuse,
@@ -456,7 +468,7 @@ def test_servers_dat_string_length_limit_counts_utf8_bytes(s, ok):
         assert build._nbt_str(s)[:2] == b"\xff\xff"
     else:
         with pytest.raises(ValueError, match="too long"):
-            build.servers_dat(s, build.SERVER_ADDRESS)
+            build.servers_dat(s, ADDR)
 
 
 def test_client_overrides_hold_only_servers_dat():
@@ -471,23 +483,66 @@ def test_entries_failing_lint_never_reach_the_writer(monkeypatch):  # mrpack_ent
     pack, _ = build.load_manifest((build.HERE / "mods.toml").read_text())
     monkeypatch.setattr(build, "CLIENT_OVERRIDES", set())
     with pytest.raises(SystemExit, match="lint failed"):
-        build.mrpack_entries(pack, [], {}, "x", build.HERE / "overrides")
+        build.mrpack_entries(pack, [], {}, "x", build.HERE / "overrides", ADDR)
 
 
 ADDRESS = re.compile(r"[A-Za-z0-9-]+\.tail[0-9a-f]+\.ts\.net")
 
 
-def test_server_address_has_one_home():  # build.SERVER_ADDRESS; every other mention must equal it
-    files = subprocess.run(["git", "ls-files", "-z"], cwd=build.ROOT, capture_output=True, check=True)
+def address_hits(root=build.ROOT):
+    """-> {tailnet address: {tracked files naming it}}."""
+    files = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True)
     hits = {}
     for rel in files.stdout.decode().split("\0"):
-        path = build.ROOT / rel
+        path = root / rel
         if rel and path.is_file():  # every tracked file, any type
             for addr in ADDRESS.findall(path.read_text(errors="replace")):
                 hits.setdefault(addr, set()).add(rel)
-    assert set(hits) == {build.SERVER_ADDRESS}, hits
-    setup = (build.ROOT / "discord" / "content" / "setup.md").read_text()
-    assert f"Add Server: `{build.SERVER_ADDRESS}`" in setup  # the fallback when servers.dat is missing
+    return hits
+
+
+def outside_the_instance_paths(hits, paths):
+    """-> {address: [files a copy keeps that name it]}: hits less the files under a kit/INSTANCE-PATHS line."""
+    kept = {a: sorted(f for f in files if not any(f == p or (p.endswith("/") and f.startswith(p)) for p in paths))
+            for a, files in hits.items()}
+    return {a: f for a, f in kept.items() if f}
+
+
+def test_server_address_has_one_home():
+    """kit.toml tailscale.server_address is the address's one home: a real tailnet address appears only in an
+    instance path (asus-node's record), never in a file a copy keeps. The tests' own address is not a tailnet one."""
+    assert not ADDRESS.search(ADDR)
+    hits = address_hits()
+    assert outside_the_instance_paths(hits, instance.entries()) == {}
+    if RECORD:  # and the only one is asus-node's own
+        assert set(hits) <= {build.server_address(FIXTURE)}, hits
+    else:
+        assert hits == {}
+    assert ADDR not in (build.HERE / "build.py").read_text()  # build.py reads kit.toml; it holds no address
+    for name in ("kit/setup.md", "setup.md"):
+        setup = build.ROOT / "discord" / "content" / name
+        if setup.exists() or name == "kit/setup.md":
+            # the fallback when servers.dat is missing: sync fills it from kit.toml (discord/test_sync.py pins it)
+            assert "Add Server: `{config:server_address}`" in setup.read_text()
+
+
+def test_the_one_home_scan_finds_an_address_outside_the_instance_paths(tmp_path):
+    """The scan, end to end on a planted repository: a real-shaped MagicDNS name (split here, so this file never
+    matches it) in a kept file is reported, the same name under a file line or a directory line is not, and a
+    directory line covers only what is under it."""
+    address = "box.tail" + "0a1b2c.ts.net"
+    assert ADDRESS.findall(f"join {address} now") == [address]
+    files = {"rec/asus.toml": address, "posts/a.md": address, "postsX/b.md": address, "README.md": f"at {address}",
+             "kit.py": "no address"}
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    hits = address_hits(tmp_path)
+    assert hits == {address: {"rec/asus.toml", "posts/a.md", "postsX/b.md", "README.md"}}
+    assert outside_the_instance_paths(hits, ["rec/asus.toml", "posts/"]) == {address: ["README.md", "postsX/b.md"]}
+    assert outside_the_instance_paths(hits, ["rec/asus.toml", "posts/", "postsX/", "README.md"]) == {}
 
 
 def test_compose_runs_and_advertises_the_manifest_version():
@@ -497,3 +552,196 @@ def test_compose_runs_and_advertises_the_manifest_version():
     motd = re.search(r'MOTD: *"[^"]*\bpack (\d+\.\d+\.\d+)"', compose)
     assert modpack and motd, "compose must name the pack file and put 'pack <version>' in the MOTD"
     assert modpack.group(1) == motd.group(1) == pack["version"]
+
+
+@pytest.mark.skipif(not RECORD, reason=NO_RECORD)
+def test_the_fixture_reproduces_asus_nodes_servers_dat_byte_for_byte():
+    """The kit gate: the pack built from kit/fixtures/asus-node.toml lists the server exactly as before the kit
+    (kit/fixtures/asus-node/servers.dat was written by the old build.py, with the address a literal)."""
+    pack, _ = build.load_manifest((build.HERE / "mods.toml").read_text())
+    entries = build.mrpack_entries(pack, [], {}, "x", build.HERE / "overrides", build.server_address(FIXTURE))
+    assert entries["client-overrides/servers.dat"] == (FIXTURE.parent / "asus-node" / "servers.dat").read_bytes()
+
+
+def test_the_address_comes_from_kit_toml_and_a_missing_one_refuses(tmp_path, monkeypatch):
+    other = tmp_path / "kit.toml"
+    box = "box." + "tail0000.ts.net"  # split, so this file never itself matches the one-home scan
+    other.write_text(EXAMPLE.read_text().replace(f'"{ADDR}"', f'"{box}"'))
+    assert build.server_address(other) == box
+    monkeypatch.setenv("MC_KIT_TOML", str(other))
+    assert build.server_address() == box  # the env names the file; the default is <repo>/kit.toml
+    with pytest.raises(SystemExit, match="kit.toml"):
+        build.server_address(tmp_path / "absent.toml")
+
+
+# ── a custom pack (docs/kit/CUSTOM-PACK.md): what the kit's machinery needs from any pack ──────────────────────
+
+VE_PACK = {"name": "Vanilla Extended", "version": "1.0.2", "minecraft": "26.1.2", "fabric_loader": "0.19.5"}
+CUSTOM = {**VE_PACK, "name": "Sky Isles", "version": "1.2.0"}
+CUSTOM_TOML = '[pack]\nname = "Sky Isles"\nversion = "1.2.0"\nminecraft = "26.1.2"\nfabric_loader = "0.19.5"\n'
+
+
+def _kit_mods(*drop, chunky_side="server"):
+    entries = [_mod("fabric-api", "both"), _mod("chunky", chunky_side), _mod("appleskin", "both")]
+    entries = [e for e in entries if e[0]["slug"] not in drop]
+    return [e[0] for e in entries], {e[0]["slug"]: e[2] for e in entries}
+
+
+def _custom_overrides(tmp_path, chunky=True):
+    over = tmp_path / "overrides"
+    over.mkdir(parents=True, exist_ok=True)
+    if chunky:
+        (over / "config" / "chunky").mkdir(parents=True, exist_ok=True)
+        (over / "config" / "chunky" / "config.json").write_bytes(
+            (build.HERE / "overrides" / "config" / "chunky" / "config.json").read_bytes())
+    return over
+
+
+def test_a_custom_pack_with_the_kits_set_passes(tmp_path):
+    mods, metas = _kit_mods()
+    assert build.kit_problems(CUSTOM, mods, metas, _custom_overrides(tmp_path)) == []
+
+
+def test_vanilla_extended_carries_the_kits_set():  # the reference passes by construction, and keeps passing
+    _, mods = build.load_manifest((build.HERE / "mods.toml").read_text())
+    server = {m["slug"] for m in mods if m["chapter"] == 1 and m["side"] != "client"}
+    assert set(build.KIT_SERVER_MODS) <= server  # slug = mod id for both
+    for rel in build.KIT_OVERRIDES:
+        assert (build.HERE / "overrides" / rel).is_file()
+
+
+@pytest.mark.parametrize("drop,side,match", [
+    (("chunky",), "server", r"^chunky: not in the pack on the server side; deploy/world\.sh"),
+    (("fabric-api",), "server", r"^fabric-api: not in the pack on the server side; ve-commands"),
+    ((), "client", r"^chunky: not in the pack on the server side"),  # a client-only Chunky never reaches P9
+])
+def test_a_custom_pack_missing_a_kit_mod_is_refused(tmp_path, drop, side, match):
+    mods, metas = _kit_mods(*drop, chunky_side=side)
+    errors = build.kit_problems(CUSTOM, mods, metas, _custom_overrides(tmp_path))
+    assert len(errors) == 1 and re.search(match, errors[0]), errors
+
+
+def test_a_kit_mod_provided_under_another_id_counts(tmp_path):  # ids and provides, as Fabric resolves them
+    mods, metas = _kit_mods("chunky")
+    m, _, meta = _mod("chunky-fork", "server", provides=["chunky"])
+    assert build.kit_problems(CUSTOM, mods + [m], {**metas, "chunky-fork": meta}, _custom_overrides(tmp_path)) == []
+
+
+def test_a_custom_pack_without_the_kits_chunky_config_is_refused(tmp_path):
+    mods, metas = _kit_mods()
+    errors = build.kit_problems(CUSTOM, mods, metas, _custom_overrides(tmp_path, chunky=False))
+    assert errors == ["overrides/config/chunky/config.json: missing, or not the kit's copy in pack/overrides/ "
+                      "(continueOnRestart: a pre-generation ring resumes after a restart (deploy/world.sh))"]
+    over = _custom_overrides(tmp_path)
+    (over / "config" / "chunky" / "config.json").write_text('{"continueOnRestart": false}')
+    assert len(build.kit_problems(CUSTOM, mods, metas, over)) == 1
+
+
+@pytest.mark.parametrize("key,value", [("minecraft", "26.1.3"), ("fabric_loader", "0.19.6")])
+def test_a_custom_pack_on_another_version_is_refused(tmp_path, key, value):
+    mods, metas = _kit_mods()
+    errors = build.kit_problems({**CUSTOM, key: value}, mods, metas, _custom_overrides(tmp_path))
+    assert len(errors) == 1 and errors[0].startswith(f"[pack] {key} = {value!r}, but the kit runs")
+    assert "ve-commands" in errors[0]
+
+
+def test_the_kit_set_names_what_the_code_depends_on():
+    """KIT_SERVER_MODS is derived from the code, so it is checked against the code: every non-builtin depends of
+    ve-commands is in it, and deploy/world.sh drives Chunky."""
+    fmj = json.loads((build.ROOT / "mod" / "ve-commands" / "src" / "main" / "resources" / "fabric.mod.json")
+                     .read_text())
+    builtin = {"minecraft", "fabricloader", "fabric-loader", "java"}
+    assert set(fmj["depends"]) - builtin <= set(build.KIT_SERVER_MODS)
+    assert fmj["environment"] == "server"
+    assert 'rcon "chunky start"' in (build.ROOT / "deploy" / "world.sh").read_text()
+
+
+def test_a_custom_pack_has_one_chapter_and_a_nameable_pack(tmp_path):
+    (tmp_path / "mods.toml").write_text(CUSTOM_TOML)
+    assert build.custom_problems(tmp_path, [{"slug": "a"}, {"slug": "b", "chapter": 1}], 1) == []
+    assert build.custom_problems(tmp_path, [{"slug": "a", "chapter": 2}], 1)[0].startswith("a custom pack has one")
+    assert build.custom_problems(tmp_path, [{"slug": "a"}], 2)[0].startswith("a custom pack has one")
+    (tmp_path / "mods.toml").write_text(CUSTOM_TOML.replace('"Sky Isles"', '"Vanilla Extended"'))
+    assert "Vanilla Extended's name" in build.custom_problems(tmp_path, [], 1)[0]
+
+
+def test_a_custom_pack_names_its_server_list_entry_and_summary_after_itself(tmp_path):
+    entries = build.mrpack_entries(CUSTOM, [], {}, "1.2.0-ch1", _custom_overrides(tmp_path), ADDR)
+    assert _nbt(entries["client-overrides/servers.dat"]) == {
+        "servers": [{"name": "Sky Isles", "ip": ADDR, "hidden": 0}]}
+    index = json.loads(entries["modrinth.index.json"])
+    assert (index["name"], index["summary"]) == ("Sky Isles", "Sky Isles — private friend server")
+    assert "overrides/config/chunky/config.json" in entries
+    ve = build.mrpack_entries(VE_PACK, [], {}, "x", build.HERE / "overrides", ADDR)
+    assert json.loads(ve["modrinth.index.json"])["summary"] == "Vanilla Extended — private friend server"
+
+
+def test_build_refuses_a_bad_custom_pack_before_any_network_work(tmp_path):
+    kit = tmp_path / "kit.toml"
+    kit.write_text(EXAMPLE.read_text().replace('mode = "vanilla-extended"', 'mode = "custom"'))
+    src = tmp_path / "mine"
+    src.mkdir()
+    (src / "mods.toml").write_text(CUSTOM_TOML.replace("26.1.2", "26.1.3")
+                                   + '[[mod]]\nslug = "chunky"\nside = "server"\nchapter = 2\n')
+    r = subprocess.run(["python3", str(build.HERE / "build.py"), "--dir", str(src)], capture_output=True, text=True,
+                       env={**os.environ, "MC_KIT_TOML": str(kit)})
+    assert r.returncode == 1 and "a custom pack has one chapter" in r.stdout
+    assert "[pack] minecraft = '26.1.3', but the kit runs '26.1.2'" in r.stdout
+    assert "not a pack the kit can build" in r.stderr
+    assert not (src / "lock.json").exists()  # refused before resolving anything
+
+
+def test_which_prints_the_pack_compose_runs():
+    r = subprocess.run(["python3", str(build.HERE / "build.py"), "--which"], capture_output=True, text=True)
+    override = build.ROOT / "docker-compose.override.yml"
+    compose = override if override.exists() else build.ROOT / "docker-compose.yml"
+    want = re.search(r'MODRINTH_MODPACK: *"/pack/([^"]+)"', compose.read_text()).group(1)
+    assert r.returncode == 0 and r.stdout == want + "\n"
+
+
+def _fake_modrinth(monkeypatch, ids):
+    """build.main against a fake Modrinth: every slug resolves to one release of a jar whose mod id is ids[slug]."""
+    jars = {slug: _jar({"id": mid, "environment": "*"}) for slug, mid in ids.items()}
+
+    def get(path):
+        slug = path.split("/")[2].split("?")[0]
+        if "/version" in path:
+            return [{"id": "V" + slug, "project_id": "P" + slug, "version_number": "1.0.0", "version_type": "release",
+                     "date_published": "2026-10-16T00:00:00Z", "game_versions": ["26.1.2"], "loaders": ["fabric"],
+                     "dependencies": [], "files": [{"primary": True, "filename": f"{slug}.jar", "url": f"u/{slug}",
+                                                    "size": 1, "hashes": {"sha1": "s" + slug, "sha512": "x"}}]}]
+        return {"id": "P" + slug, "client_side": "optional", "server_side": "optional"}
+    monkeypatch.setattr(build, "get", get)
+    monkeypatch.setattr(build, "fetch", lambda entry, cache: jars[entry["filename"][:-4]])
+
+
+def test_main_builds_a_custom_pack_named_after_itself_from_its_own_dir(tmp_path, monkeypatch, capsys):
+    """End to end through main(), with Modrinth faked: pack-custom's mods.toml, its own lock.json and overrides, and
+    a dist/ file, servers.dat entry and summary named after its [pack]. Then the same pack without Chunky refuses."""
+    kit = tmp_path / "kit.toml"
+    kit.write_text(EXAMPLE.read_text().replace('mode = "vanilla-extended"', 'mode = "custom"'))
+    root = tmp_path / "root"
+    src = root / "pack-custom"
+    _custom_overrides(src)
+    (src / "mods.toml").write_text(CUSTOM_TOML + "".join(f'[[mod]]\nslug = "{s}"\nside = "{side}"\n' for s, side in
+                                                          (("fabric-api", "both"), ("chunky", "server"))))
+    _fake_modrinth(monkeypatch, {"fabric-api": "fabric-api", "chunky": "chunky"})
+    monkeypatch.setattr(build, "ROOT", root)  # dist/ goes under tmp_path; pack/ (the reference) stays the real one
+    monkeypatch.setenv("MC_KIT_TOML", str(kit))
+    monkeypatch.setattr(sys, "argv", ["build.py", "--dir", str(src)])
+    assert build.main() == 0
+    out = root / "dist" / "sky-isles-1.2.0-ch1.mrpack"
+    assert "written dist/sky-isles-1.2.0-ch1.mrpack: 2 jars" in capsys.readouterr().out
+    with zipfile.ZipFile(out) as z:
+        index = json.loads(z.read("modrinth.index.json"))
+        dat = z.read("client-overrides/servers.dat")
+        assert "overrides/config/chunky/config.json" in z.namelist()
+    assert (index["name"], index["versionId"]) == ("Sky Isles", "1.2.0-ch1")
+    assert _nbt(dat)["servers"][0]["name"] == "Sky Isles"
+    assert set(json.loads((src / "lock.json").read_text())["mods"]) == {"fabric-api", "chunky"}
+    assert not (root / "pack").exists()  # nothing written beside the tracked pack/
+    (src / "mods.toml").write_text(CUSTOM_TOML.replace("1.2.0", "1.2.1") + '[[mod]]\nslug = "fabric-api"\nside = "both"\n')
+    with pytest.raises(SystemExit, match="lint failed: 1 error"):
+        build.main()
+    assert "ERROR chunky: not in the pack on the server side" in capsys.readouterr().out
+    assert not (root / "dist" / "sky-isles-1.2.1-ch1.mrpack").exists()

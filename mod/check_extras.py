@@ -8,7 +8,7 @@ It fails closed: any error, of any kind, is a FAIL line, never silence.
 
 Why each check:
 - A MODS file missing from extras/, or one uid 1000 cannot read, is fatal at boot. itzg's mcopy (run as uid 1000)
-  errors, and minecraft never starts. That was seen on the workstation spike 2026-10-01 (exit 2 when missing; exit 1 when
+  errors, and minecraft never starts. That was seen on a spike 2026-10-01 (exit 2 when missing; exit 1 when
   unreadable, per rv2). Under `restart: unless-stopped` the container crash-loops.
 - The expected sha256 of each released jar lives in mod/RELEASE.sha256. The build is reproducible, so a rebuild
   from the tagged source matches it.

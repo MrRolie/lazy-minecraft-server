@@ -32,7 +32,7 @@ probe_verdict() {
 # re-probes. A successful defence is logged only at trace level.
 conflict_lines() { grep -iE 'conflict detected|address conflict for .* detected|sees conflict' || true; }
 
-# lines_for_ip IP: stdin -> the lines naming exactly IP (192.168.1.5 does not match 192.168.1.50).
+# lines_for_ip IP: stdin -> the lines naming exactly IP (192.0.2.5 does not match 192.0.2.50).
 lines_for_ip() {
   local re="${1//./\\.}"
   grep -E "(^|[^0-9.])${re}([^0-9]|\$)" || true

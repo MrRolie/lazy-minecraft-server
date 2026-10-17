@@ -17,6 +17,22 @@ dist/
 # built server-side jars that compose hands to itzg (MODS); rebuilt from mod/ (mod/README.md)
 extras/
 pack/.cache/
+# a custom pack (docs/kit/CUSTOM-PACK.md): the instance's own, never committed, so the tracked pack/ stays clean and a
+# pull never conflicts; kit/render.py writes the override that points compose at it; pack/spike.sh boots it once
+/pack-custom/
+/docker-compose.override.yml
+/spike/
 .claude/worktrees/
 # the maintenance flag (deploy/world.sh maintenance; host/bin/mc-heal stands down while it exists)
 /maintenance
+
+# kit: the instance's config (kit/kit.example.toml) and what kit/render.py renders from it
+/kit.toml
+/host/kit.env
+/host/rendered/
+# kit/render.py write_atomic's temp files (host/.kit.env.render-<pid>.tmp, ..env.render-<pid>.tmp), left by a crash
+.*.render-*.tmp
+# kit/probe.sh's output (KIT.md P0): the facts it read from this machine
+/kit/probe.json
+# kit/record.py's run records: handed back by hand, never committed (an agent ledger stays out of git history)
+/kit/runs/
