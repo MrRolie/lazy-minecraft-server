@@ -565,6 +565,52 @@ def test_root_is_refused(monkeypatch, tmp_path, capsys):
     assert "not root" in capsys.readouterr().err and not (tmp_path / "runs").exists()
 
 
+def test_old_python_is_refused_before_anything_is_written(monkeypatch, tmp_path, capsys):
+    """record.py start is the first kit command a run executes (KIT.md "Before P0"): on Ubuntu 22.04's python3 it
+    stops there with the floor named, never a traceback later."""
+    monkeypatch.setenv("MC_KIT_RUNS", str(tmp_path / "runs"))
+    assert record.main(["start"], version=(3, 10, 12)) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("refusing: python3 is 3.10.12, older than 3.11: the kit needs Python 3.11 or newer"), err
+    assert not (tmp_path / "runs").exists()
+    assert record.main(["start"], version=(3, 11, 0)) == 0  # the floor itself passes
+
+
+def test_old_python_is_refused_before_the_parser_is_built(monkeypatch, tmp_path, capsys):
+    """Ubuntu 18.04's python3 is 3.6, whose argparse has no add_subparsers(required=): the parser raises TypeError
+    there. The floor must refuse before the parser is built, so that run ends in the plain reason too."""
+    monkeypatch.setenv("MC_KIT_RUNS", str(tmp_path / "runs"))
+
+    def py36_argparse(*a, **k):
+        raise TypeError("__init__() got an unexpected keyword argument 'required'")
+    monkeypatch.setattr(record.argparse, "ArgumentParser", py36_argparse)
+    assert record.main(["start"], version=(3, 6, 9)) == 1
+    assert capsys.readouterr().err.startswith("refusing: python3 is 3.6.9, older than 3.11")
+    assert not (tmp_path / "runs").exists()
+
+
+def test_the_python_floor_guard_catches_its_mutant(monkeypatch, tmp_path):
+    guard = '    if floor:\n        print(f"refusing: {floor}", file=sys.stderr)\n        return 1\n'
+    assert SOURCE.count(guard) == 1, "stale or ambiguous mutation pattern"
+    mod = load(SOURCE.replace(guard, ""), tmp_path, "record_floor_mut")
+    monkeypatch.setenv("MC_KIT_RUNS", str(tmp_path / "runs"))
+    mod.REPO = record.REPO
+    mod.KIT_MD, mod.STEPS_MD = record.KIT_MD, record.STEPS_MD
+    assert mod.main(["start"], version=(3, 10, 12)) == 0  # without the guard, an old python3 starts a run
+
+
+def test_record_refuses_under_a_real_python_3_10_without_a_traceback(tmp_path):
+    from test_host_bootstrap import find_python310
+    py310 = find_python310()
+    if not py310:
+        pytest.skip("no Python 3.10 here (uv python install 3.10 provides one)")
+    env = {**os.environ, "MC_KIT_RUNS": str(tmp_path / "runs"), "PYTHONDONTWRITEBYTECODE": "1"}
+    r = subprocess.run([py310, str(KIT / "record.py"), "start"], env=env, capture_output=True, text=True)
+    assert r.returncode == 1 and "Traceback" not in r.stdout + r.stderr, r.stdout + r.stderr
+    assert r.stderr.startswith("refusing: python3 is 3.10.") and "older than 3.11" in r.stderr
+    assert not (tmp_path / "runs").exists()
+
+
 def test_root_guard_catches_its_mutant(monkeypatch, tmp_path):
     guard = "if os.geteuid() == 0:"
     assert SOURCE.count(guard) == 1

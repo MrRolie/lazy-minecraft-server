@@ -39,6 +39,9 @@ when every required one-time step was logged (KIT.md logs steps 1-6 with --retro
 while any is missing, so the run stays open and the step can still be logged; `finish --incomplete` seals it anyway,
 and record.md then headlines N as INCOMPLETE, a floor. `status` names the required steps not logged yet.
 Files: kit/runs/<run id>/ (gitignored; $MC_KIT_RUNS overrides, for tests). Stdlib only; it needs no kit.toml.
+It is the first kit command a run executes (KIT.md "Before P0"), so it refuses a python3 under the kit's floor
+(kit/probe.py PYTHON_FLOOR, 3.11) with a plain reason, and must itself run on an older one: stdlib only, no
+3.11-only syntax or imports.
 """
 import argparse
 import datetime
@@ -49,6 +52,8 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+
+from probe import python_floor_problem  # the floor's one home; probe.py is stdlib only and import-safe
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -520,7 +525,14 @@ def cmd_status(rd, phases, steps):
     return "\n".join(lines)
 
 
-def main(argv=None):
+def main(argv=None, version=None):
+    """version: the python3 version to judge against the floor (tests fake it); default the running one."""
+    # The floor comes first, before the parser: add_subparsers(required=) is 3.7+, so on Ubuntu 18.04's 3.6 the
+    # parser itself would die with a traceback before any later check could refuse.
+    floor = python_floor_problem(sys.version_info if version is None else version)
+    if floor:
+        print(f"refusing: {floor}", file=sys.stderr)
+        return 1
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("start")

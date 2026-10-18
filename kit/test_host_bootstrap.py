@@ -43,7 +43,7 @@ GOOD = {
     "euid": "1000", "uid": "1000", "gid": "1000", "user": "kit", "os_id": "ubuntu", "os_codename": "noble",
     "os_version": "24.04", "kernel": "6.8.0-45-generic", "mem_total_kib": str(15 * 1024 * 1024 + 512 * 1024),
     "threads": "4", "cores": "2", "disk_free_bytes": str(400 * 10 ** 9), "nm_active": "active", "nmcli": "yes",
-    "ip_ok": "yes",
+    "ip_ok": "yes", "python3_version": "3.12.3",
     "nm_wired": ["Wired connection 1"], "nm_wifi": ["HomeNet"], "nic": ["enp0s31f6 ethernet", "wlp2s0 wifi"],
     "ipv4": ["127.0.0.1/8 lo", "192.168.1.20/24 enp0s31f6"],
     "route": ["192.168.1.0/24 enp0s31f6", "100.100.100.100 tailscale0", "127.0.0.0/8 lo"],
@@ -96,6 +96,10 @@ def test_a_proven_class_laptop_passes():
     ({"disk_free_bytes": None}, "free disk unknown"),
     ({"mem_total_kib": str((14 * 1024 - 1) * 1024)}, "under the proven 16 GB class"),
     ({"mem_total_kib": None}, "RAM unknown"),
+    ({"python3_version": "3.10.12"}, "python3 is 3.10.12, older than 3.11: the kit needs Python 3.11 or newer"),
+    ({"python3_version": "2.7.18"}, "older than 3.11"),
+    ({"python3_version": None}, "python3 version unknown"),
+    ({"python3_version": "3.x"}, "python3 version unknown"),
 ])
 def test_each_gate_refuses(change, says):
     refusals, _, _ = probe.judge(facts(**change))
@@ -111,6 +115,8 @@ def test_each_gate_refuses(change, says):
      "ipv4": ["10.213.37.1/24 br-mcve"]},
     {"route": ["10.213.38.0/24 eth1", "10.213.36.0/24 eth2"]},  # neighbours, not overlaps
     {"nm_wired": [], "nm_wifi": ["HomeNet"]},  # a Wi-Fi-only laptop
+    {"python3_version": "3.11.0"},  # the Python floor itself passes
+    {"python3_version": "3.14.2"},  # a newer Ubuntu's python3
 ])
 def test_the_edges_pass(change):
     assert probe.judge(facts(**change))[0] == []
@@ -126,6 +132,12 @@ def test_under_the_ram_floor_only_an_explicit_acceptance_goes_on_and_it_is_recor
 def test_the_acceptance_does_not_waive_any_other_gate():
     refusals, _, _ = probe.judge(facts(mem_total_kib=str(8 * 1024 * 1024), uid="1001"), accept_unproven_ram=True)
     assert len(refusals) == 1 and "uid/gid" in refusals[0]
+
+
+def test_the_python_floor_refusal_names_the_floor_and_the_ubuntu_that_ships_it():
+    msg = probe.python_floor_problem((3, 10, 12))
+    assert "Python 3.11 or newer" in msg and "Ubuntu 24.04 LTS and newer" in msg and "22.04 has 3.10" in msg
+    assert probe.python_floor_problem((3, 11, 0)) is None and probe.python_floor_problem((3, 12, 3)) is None
 
 
 def test_warnings_for_what_is_unproven_but_not_refused():
@@ -201,6 +213,9 @@ def test_probe_reads_a_fake_laptop_and_passes(tmp_path):
     assert f["ipv4"] == ["127.0.0.1/8 lo", "192.168.1.20/24 eno1"]
     assert f["charge_threshold"] == ["/sys/class/power_supply/BAT0/charge_control_end_threshold"]
     assert (f["cores"], f["threads"], f["os_codename"], f["tz"]) == ("2", "4", "noble", "Europe/Berlin")
+    real = subprocess.run(["python3", "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    assert f["python3_version"] == real  # the python3 on PATH, the one that runs probe.py and the rest of the kit
     assert doc["derived"]["ram_mib"] == int(15.5 * 1024)
 
 
@@ -225,6 +240,48 @@ def test_probe_refuses_end_to_end_and_still_writes_why(tmp_path, machine, env, d
     assert r.returncode == 1
     assert doc["verdict"] == "refused" and any(says in x for x in doc["refusals"]), doc["refusals"]
     assert "REFUSE" in r.stdout
+
+
+def test_probe_refuses_an_old_python3_end_to_end(tmp_path):
+    """probe.sh reads the version from PATH's python3 (here a stub saying 3.10.12, which still runs the real one for
+    probe.py), and the probe refuses on that alone."""
+    real = shutil.which("python3")
+    old = f'if [ "$1" = -c ]; then echo 3.10.12; else exec {real} "$@"; fi'
+    root, stubs = fake_machine(tmp_path)
+    path = bin_dir(tmp_path, **stubs, python3=old)
+    out = tmp_path / "probe.json"
+    r = subprocess.run(["bash", str(KIT / "probe.sh"), "--out", str(out)], capture_output=True, text=True,
+                       env={"PATH": path, "PROBE_ROOT": str(root)})
+    doc = json.loads(out.read_text())
+    assert r.returncode == 1 and doc["facts"]["python3_version"] == "3.10.12"
+    assert doc["refusals"] == [probe.python_floor_problem((3, 10, 12))]
+    assert "REFUSE  python3 is 3.10.12, older than 3.11" in r.stdout
+
+
+def find_python310():
+    """A real Python 3.10 (Ubuntu 22.04's), from PATH or uv's managed installs; None when neither has one."""
+    found = shutil.which("python3.10")
+    if not found and shutil.which("uv"):
+        r = subprocess.run(["uv", "python", "find", "--no-project", "3.10"], capture_output=True, text=True)
+        found = r.stdout.strip() if r.returncode == 0 else None
+    return found
+
+
+def test_probe_refuses_under_a_real_python_3_10_without_a_traceback(tmp_path):
+    py310 = find_python310()
+    if not py310:
+        pytest.skip("no Python 3.10 here (uv python install 3.10 provides one)")
+    root, stubs = fake_machine(tmp_path)
+    path = bin_dir(tmp_path, **stubs)
+    (Path(path) / "python3").unlink()
+    (Path(path) / "python3").symlink_to(py310)
+    out = tmp_path / "probe.json"
+    r = subprocess.run(["bash", str(KIT / "probe.sh"), "--out", str(out)], capture_output=True, text=True,
+                       env={"PATH": path, "PROBE_ROOT": str(root), "PYTHONDONTWRITEBYTECODE": "1"})
+    assert r.returncode == 1 and "Traceback" not in r.stdout + r.stderr, r.stdout + r.stderr
+    doc = json.loads(out.read_text())
+    assert doc["facts"]["python3_version"].startswith("3.10.") and len(doc["refusals"]) == 1
+    assert "older than 3.11: the kit needs Python 3.11 or newer" in doc["refusals"][0]
 
 
 BR_MCVE_ROUTES = "\n".join([  # the lines a host with the kit's bridge up adds (shape read from a dev machine's docker0)

@@ -21,12 +21,12 @@ headings are the ids `kit/record.py` accepts; keep them stable.
 | Each friend, once | F1–F10 | **10** (most friends already have F1, and some have F2) |
 | You, now and then | R1–R2 | 2 |
 
-**The promise:** "you do about 19 things once, each friend does 10; Claude does the rest." Where 19 comes from, in
-one line: the plan's 17 one-time steps (1, 2 and 4–18, with step 9), plus two from the design decisions and the
-one-machine set-up (revoking the Tailscale token, 21, and logging back in after the test restart, 22), make 19 with
-Discord sign-up and 18 without; the proof run measured the 18 (its host had Discord). Choosing the pack (23) came
-after the run: 20 with step 9, 19 without. Steps 19 and 20 (a Wi-Fi password, a router range) are conditional and
-were never in the plan's 17 (the kit's design plan, private and not in this copy).
+**The promise:** "you do about 20 things once (19 if you already have Discord), each friend does 10; Claude does
+the rest." Where 20 comes from, in one line: the kit's first design had 17 one-time steps (1, 2 and 4–18, with step
+9), plus two from the design decisions and the one-machine set-up (revoking the Tailscale token, 21, and logging back
+in after the test restart, 22), make 19 with Discord sign-up and 18 without; the proof run measured the 18 (its host
+had Discord). Choosing the pack (23) came after the run: 20 with step 9, 19 without. Steps 19 and 20 (a Wi-Fi
+password, a router range) are conditional and were never in the first design's 17.
 
 **Settled by the proof run:** a captcha on **Authorize** came up for both bots (it is part of steps 13 and 16);
 Message Content for the bridge bot went through Discord's API with no clicks from the person (step 14); the
@@ -53,8 +53,10 @@ installer runs over VNC, and there is no BIOS step. Steps 1 and 2 still count.
 
 ### 1. Make the Ubuntu USB stick
 
-On another computer, download **Ubuntu Desktop 24.04 LTS** from ubuntu.com/download/desktop and write it to a USB
-stick of 12 GB or more (for example with balenaEtcher or Rufus). Use Desktop, not Server: the kit's network
+On another computer, download **Ubuntu Desktop 24.04 LTS or newer** from ubuntu.com/download/desktop and write it
+to a USB stick of 12 GB or more (for example with balenaEtcher or Rufus). 24.04 is the version the kit was tested
+on. A newer one (the download page offers 26.04 first) should work, but nobody has tested it yet. 22.04 or older
+won't work: Claude stops at its first check and tells you why. Use Desktop, not Server: the kit's network
 handling is built on NetworkManager, which Server does not use.
 
 ### 2. Install Ubuntu on the laptop

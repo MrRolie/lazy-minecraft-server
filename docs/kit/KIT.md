@@ -98,6 +98,9 @@ set up the server.
    cd ~/minecraft-ai-host && python3 kit/record.py start && for s in 1 2 4 5; do python3 kit/record.py human "$s" --retro || exit 1; done && python3 kit/record.py human 6 --retro --note "steps 1-6 took about <their answer>"
    ```
 
+   If `start` refuses because python3 is older than 3.11 (Ubuntu 22.04 or older), stop: tell the person the kit
+   needs Ubuntu Desktop 24.04 LTS or newer; the kit has changed nothing yet.
+
    `--unplanned` is only for a step the list lacks (`python3 kit/record.py human --unplanned "<what>"`), never for
    the time a listed step took: an unplanned step adds 1 to N.
 4. Step 3 is optional (power on after a power cut, a BIOS setting). Ask whether they did it: if yes,
@@ -132,15 +135,16 @@ python3 kit/record.py gate P0 -- bash kit/probe.sh
 python3 kit/record.py end P0
 ```
 
-- **A REFUSE line** (root, uid or gid ≠ 1000, not Ubuntu, no NetworkManager connection, a route into
-  `10.213.37.0/24`, under 50 GB free, or a fact it could not read): stop. Tell the person plainly why the kit can't
-  run here as it stands; do not work around it.
+- **A REFUSE line** (root, uid or gid ≠ 1000, not Ubuntu, python3 older than 3.11 (Ubuntu 22.04 or older), no
+  NetworkManager connection, a route into `10.213.37.0/24`, under 50 GB free, or a fact it could not read): stop.
+  Tell the person plainly why the kit can't run here as it stands; do not work around it.
 - **Under 16 GB of RAM** (the probe's floor is 14 GiB of MemTotal, a nominal 16 GB machine): only 16 GB is proven.
   Tell them: "This laptop has N GB. The kit is proven on 16 GB; on less it may run out of memory with several
   friends on, and nobody has measured where the floor is. Do you want to go ahead anyway?" Only on a clear yes,
   begin P0 again and gate `bash kit/probe.sh --accept-unproven-ram` (the acceptance is written into probe.json),
   and set `server.memory` to about RAM − 7 GiB in P4.
 - A WARN (a codename other than `noble`, under 4 threads, a battery without a charge-cap file): say it, and go on.
+  A newer Ubuntu than 24.04 (26.04 `resolute`) is the codename WARN: it should work, but the kit is untested there.
 
 Then start `kit.toml` from the example and fill in `[host]`, `[net]` and `[battery]` from `kit/probe.json`
 (`derived`) and the system:

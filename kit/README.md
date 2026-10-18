@@ -15,6 +15,8 @@ Ubuntu to friends' invite link. What it found is fixed (in code with tests, or i
   is supported but not yet tested). 16 GB is the only size proven so far (the kit's test run was a 16 GB virtual
   machine; the original server, a 16 GB i5-7200U laptop with 2 cores / 4 threads, runs the version the kit came from). Less may work for a few
   friends, but nobody has measured it; Claude will tell you if your laptop is below that and let you decide.
+- **Ubuntu Desktop 24.04 LTS or newer** for the laptop (you install it in steps 1 and 2). 24.04 is the tested version;
+  newer should work but is untested. Desktop, not Server, and not 22.04 or older: the kit stops on those.
 - **A USB stick of 12 GB or more**, and another computer to make it on.
 - **A Claude Pro or Max plan.** The free plan doesn't include Claude Code.
 - **A Discord account**, and for each friend: Minecraft Java Edition, a Discord account and a free Tailscale account.

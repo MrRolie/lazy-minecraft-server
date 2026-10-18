@@ -6,6 +6,25 @@ A modded Minecraft server for you and your friends, on an old laptop you already
 your Discord server's channels, the private network, the Minecraft server itself, backups and self-repair. You do the handful
 of steps only a person can do, and then you play.
 
+## Start here
+
+These six steps come before Claude can help. Every click is in [docs/kit/HUMAN-STEPS.md](docs/kit/HUMAN-STEPS.md).
+
+1. On another computer, write **Ubuntu Desktop 24.04 LTS or newer** to a USB stick of 12 GB or more. 24.04 is the
+   tested version; newer should work but is untested; 22.04 or older won't work.
+2. Install it on the laptop. The account you create is the one the server runs as, so make it the laptop's first
+   account.
+3. (Optional) In the laptop's BIOS, turn on power-on after a power cut, if it has that setting.
+4. Get a Claude Pro or Max plan at claude.ai.
+5. On the laptop, open a terminal (Ctrl+Alt+T) and paste:
+   ```sh
+   sudo apt-get update && sudo apt-get install -y curl git && curl -fsSL https://claude.ai/install.sh | bash
+   ```
+6. Run `claude`, log in, and tell it: "set up the Minecraft friend server kit from
+   https://github.com/MrRolie/lazy-minecraft-server".
+
+From there Claude takes over, and tells you each time it needs you.
+
 ## Who it's for
 
 Part-time players who want a server for their group without spending their free evenings running it.
@@ -22,8 +41,8 @@ share, install a launcher, import the pack, whitelist themselves.
 
 **You, now and then:** 2 steps: a fresh share link for a late friend, and logging Claude Code back in when asked.
 
-Every step, and where to click: [docs/kit/HUMAN-STEPS.md](docs/kit/HUMAN-STEPS.md). To begin: the "Start"
-section of [kit/README.md](kit/README.md).
+Every step, and where to click: [docs/kit/HUMAN-STEPS.md](docs/kit/HUMAN-STEPS.md). The first six are under
+"Start here" above.
 
 **Claude does the rest,** and tells you when it needs you. It checks the laptop and stops with a plain reason if
 the kit can't run there. It installs Docker and Tailscale and sets up friend access. It builds your Discord
@@ -49,8 +68,10 @@ your group to find out by playing. This custom path has not yet run end to end o
 
 - **An old laptop with 16 GB of RAM**, an SSD with **50 GB free**, and a network cable to your router (Wi-Fi alone
   is supported but not yet tested). 16 GB is the only size proven so far. Below that, Claude tells you and lets you decide.
-- **A USB stick of 12 GB or more**, and another computer to make it on. The laptop gets a fresh Ubuntu Desktop
-  24.04 LTS; the account you make there must be its first.
+- **Ubuntu Desktop 24.04 LTS or newer** for the laptop (you install it in steps 1 and 2). 24.04 is the tested version;
+  newer should work but is untested. Desktop, not Server, and not 22.04 or older: the kit stops on those.
+- **A USB stick of 12 GB or more**, and another computer to make it on. The account you make on the laptop must be
+  its first.
 - **A Claude plan that includes Claude Code** (Pro or Max).
 - **A Discord account** and **a Tailscale account.**
 - **Friends** with Minecraft Java Edition, and Prism Launcher or the Modrinth App.
@@ -133,8 +154,9 @@ the docs), except one open finding (below), and no run has gone through those fi
 uv run --with pytest --with discord.py==2.7.1 pytest
 ```
 
-On this snapshot (2026-10-16): 1667 pass and 52 skip. Every skip says why: it needs the original server's
-private record, which is not in this copy. Some tests read git history, so run them in a clone, not a bare download.
+On this snapshot (2026-10-18): 1685 pass and 52 skip. Every skip says why: it needs the original server's
+private record, which is not in this copy. On a machine without Python 3.10, two more tests skip, also with their
+reason. Some tests read git history, so run them in a clone, not a bare download.
 
 ## How it was built
 
@@ -146,8 +168,8 @@ or a "codex review" mean those AI passes.
 
 ## This snapshot
 
-A public snapshot of a private repository, taken 2026-10-16 from commit `88f8a4e`. Dropped, exactly as
-`kit/INSTANCE-PATHS` lists: the original server's instance record, its friends' Discord text and posts, and his
+A public snapshot of a private repository, taken 2026-10-18 from commit `a08519d`. Dropped, exactly as
+`kit/INSTANCE-PATHS` lists: the original server's instance record, its friends' Discord text and posts, and Mikael's
 working notes. A few lines elsewhere were edited where they pointed at those files or at private context, and this
 README and the LICENSE are new. The history stays private.
 

@@ -561,6 +561,43 @@ def test_step_7_runs_the_kit_sudoers_tool_not_a_hand_written_line():
     assert "sudo bash ~/minecraft-ai-host/kit/sudoers.sh install" in section("Before P0")
 
 
+def ubuntu_floor_problems(steps_text, readme, kit_text):
+    """Which Ubuntu to install (operator 2026-10-18): 24.04 LTS or newer, 24.04 the tested one, newer untested,
+    Desktop not Server, 22.04 and older refused (kit/probe.py and kit/record.py refuse python3 under 3.11)."""
+    flat = lambda t: " ".join(t.split())  # noqa: E731
+    step1 = flat(steps_text[steps_text.index("### 1."):steps_text.index("### 2.")])
+    want = {"HUMAN-STEPS step 1": (step1, ["**Ubuntu Desktop 24.04 LTS or newer**", "24.04 is the version the kit was "
+                                          "tested on", "should work, but nobody has tested it yet",
+                                          "22.04 or older won't work", "Use Desktop, not Server"]),
+            "README": (flat(readme), ["**Ubuntu Desktop 24.04 LTS or newer**", "newer should work but is untested",
+                                      "not 22.04 or older"]),
+            "KIT.md P0": (flat(section("P0. Probe", kit_text)), ["python3 older than 3.11 (Ubuntu 22.04 or older)"]),
+            "KIT.md Before P0": (flat(section("Before P0", kit_text)), ["If `start` refuses because python3 is older "
+                                                                        "than 3.11"])}
+    problems = [f"{where} lacks: {w}" for where, (text, ws) in want.items() for w in ws if w not in text]
+    for name, text in (("HUMAN-STEPS", steps_text), ("README", readme), ("KIT.md", kit_text)):
+        if "24.04 LTS**" in text or "install Ubuntu Desktop 24.04 LTS)" in text:  # the old "24.04 only" wording
+            problems.append(f"{name} still says 24.04 only")
+    return problems
+
+
+def test_the_docs_say_ubuntu_24_04_or_newer():
+    assert ubuntu_floor_problems(STEPS_TEXT, DOCS["kit/README.md"], TEXT) == []
+
+
+@pytest.mark.parametrize("doc,old,new", [
+    ("steps", "**Ubuntu Desktop 24.04 LTS or newer**", "**Ubuntu Desktop 24.04 LTS**"),
+    ("steps", "22.04 or older\nwon't work", "22.04 should\nwork"),
+    ("readme", "and not 22.04 or older", "and 22.04 is fine"),
+    ("kit", "python3 older than 3.11 (Ubuntu 22.04 or older), no", "no"),
+])
+def test_the_ubuntu_floor_pin_catches_its_mutant(doc, old, new):
+    texts = {"steps": STEPS_TEXT, "readme": DOCS["kit/README.md"], "kit": TEXT}
+    assert texts[doc].count(old) == 1, f"stale or ambiguous mutation pattern {old!r}"
+    texts[doc] = texts[doc].replace(old, new)
+    assert ubuntu_floor_problems(texts["steps"], texts["readme"], texts["kit"])
+
+
 def test_human_steps_md_count_matches_its_mandatory_steps():
     """The count table's 20 = the one-time ids minus the optional and conditional ones (3, 19, 20); 19 without
     step 9 (most people have Discord). A step added or removed without updating the count fails here."""
@@ -568,15 +605,16 @@ def test_human_steps_md_count_matches_its_mandatory_steps():
     one_time = {s for s in steps if s.isdigit()}
     assert len(one_time - {"3", "19", "20"}) == 20 and len(record.required_steps(steps)) == 19
     assert "| **20** (19 if you already have Discord: step 9)" in STEPS_TEXT
-    assert '"you do about 19 things once, each friend does 10; Claude does the rest."' in STEPS_TEXT
+    assert '"you do about 20 things once (19 if you already have Discord), each friend does 10; Claude does the rest."' in \
+        " ".join(STEPS_TEXT.split())
     assert promise_problems(STEPS_TEXT) == []
 
 
 def promise_problems(steps_text):
     """The promise paragraph derives its number once, the way the table counts (review 2026-10-16: it derived 19
-    twice, from two different sets of steps). The plan's 17 = 1, 2 and 4-18, so it holds step 9."""
+    twice, from two different sets of steps). The first design's 17 = 1, 2 and 4-18, so it holds step 9."""
     para = " ".join(steps_text[steps_text.index("**The promise:**"):].split("\n\n")[0].split())
-    want = ["the plan's 17 one-time steps (1, 2 and 4–18, with step 9)",
+    want = ["the kit's first design had 17 one-time steps (1, 2 and 4–18, with step 9)",
             "make 19 with Discord sign-up and 18 without; the proof run measured the 18",
             "Choosing the pack (23) came after the run: 20 with step 9, 19 without."]
     problems = [f"missing: {w}" for w in want if w not in para]
@@ -587,7 +625,7 @@ def promise_problems(steps_text):
 
 
 @pytest.mark.parametrize("old,new", [
-    ("Choosing the pack (23) came\nafter the run: 20 with step 9, 19 without.",
+    ("Choosing the pack (23) came after the run: 20 with step 9, 19 without.",
      "The 19th is choosing the pack (23), added after it."),
     ("Steps 19 and 20", "The router step (20) left the count. Steps 19 and 20"),
 ])

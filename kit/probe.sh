@@ -3,11 +3,11 @@
 #
 #   bash kit/probe.sh [--accept-unproven-ram] [--out FILE]      as the kit user (never root)
 #
-# It reads the machine and changes nothing: RAM, CPU, disk free under the repo, uid/gid, Ubuntu release, kernel,
-# NetworkManager and its connections, the NICs, the battery charge-cap sysfs, and the IPv4 routes and addresses
-# (for an overlap with the bridge network 10.213.37.0/24, a kit constant). This script only OBSERVES: it writes
-# raw facts, and kit/probe.py JUDGES them (the REFUSE gates) and writes the JSON (default kit/probe.json,
-# gitignored). A fact it cannot read is written as unknown, and an unknown gated fact is a refusal, never a pass.
+# It reads the machine and changes nothing: RAM, CPU, disk free under the repo, uid/gid, Ubuntu release, python3's
+# version, kernel, NetworkManager and its connections, the NICs, the battery charge-cap sysfs, and the IPv4 routes
+# and addresses (for an overlap with the bridge network 10.213.37.0/24, a kit constant). This script only OBSERVES:
+# it writes raw facts, and kit/probe.py JUDGES them (the REFUSE gates) and writes the JSON (default
+# kit/probe.json, gitignored). A fact it cannot read is written as unknown, and an unknown gated fact is a refusal, never a pass.
 #
 # Exit: 0 every gate passed; 1 refused (the JSON says why); 2 usage, python3 missing, or the observer failed.
 # Tests point it at fixtures: PROBE_ROOT prefixes /proc, /sys and /etc/os-release; commands come from PATH.
@@ -50,6 +50,8 @@ facts() {
     fact os_codename "$(cut -f2 <<<"$v")"
     fact os_version "$(cut -f3 <<<"$v")"
   fi
+  # The python3 that runs kit/probe.py below and every later kit command; probe.py refuses it under 3.11.
+  fact python3_version "$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)"
   fact kernel "$(uname -r 2>/dev/null)"
   fact mem_total_kib "$(awk '$1 == "MemTotal:" { print $2 }' "${ROOT}/proc/meminfo" 2>/dev/null)"
   fact threads "$(nproc --all 2>/dev/null)"

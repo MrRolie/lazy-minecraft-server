@@ -7,6 +7,9 @@ REFUSE (exit 1), each with the reason in the JSON:
   - run as root (the probe, render and the checks run as the kit user)
   - uid or gid other than 1000 (itzg and the bridge image write the mailbox as 1000)
   - not Ubuntu (every later phase is apt, NetworkManager and unattended-upgrades)
+  - python3 older than PYTHON_FLOOR (3.11: the kit's config reader imports tomllib; Ubuntu 22.04 ships 3.10). This
+    file and kit/record.py, the first kit command a run executes, must themselves run on an older python3 so they can
+    refuse it: stdlib only, no 3.11-only syntax or imports here
   - NetworkManager not active, or nmcli missing (host/setup.sh's network step is nmcli throughout)
   - no network connection NetworkManager could configure (no wired and no Wi-Fi connection)
   - an IPv4 route or address overlapping 10.213.37.0/24, the bridge network (a kit constant; br-mcve's own routes and
@@ -29,6 +32,10 @@ DISK_FLOOR_BYTES = 50 * 10 ** 9
 # A "16 GB" laptop reports less than 16 GiB as MemTotal: firmware and the integrated GPU keep some (asus-node's 16 GB
 # shows as 15 GiB in free -h). 14 GiB keeps every 16 GB machine in and every 12 GB one (about 11.5 GiB) out.
 RAM_FLOOR_MIB = 14 * 1024
+# The kit's Python floor: kit/kitconfig.py and kit/tailscale.py import tomllib (3.11). Ubuntu 24.04 ships 3.12,
+# 22.04 ships 3.10. kit/record.py refuses below it too (python_floor_problem), so a run on old Python stops at its
+# first command.
+PYTHON_FLOOR = (3, 11)
 PROVEN_CODENAME = "noble"  # Ubuntu 24.04: asus-node, and the Tailscale Origins-Pattern (host/conf/apt-52mc-host)
 LISTS = ("nm_wired", "nm_wifi", "nic", "ipv4", "route", "battery", "charge_threshold", "charge_types")
 
@@ -54,6 +61,26 @@ def _int(v):
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def python_floor_problem(version):
+    """-> why this python3 is below the kit's floor, or None. version: a tuple of ints (sys.version_info works), or
+    None when it could not be read (unknown refuses)."""
+    floor = ".".join(map(str, PYTHON_FLOOR))
+    if version is None:
+        return f"python3 version unknown: the kit needs Python {floor} or newer"
+    if tuple(version[:2]) >= PYTHON_FLOOR:
+        return None
+    return (f"python3 is {'.'.join(map(str, version[:3]))}, older than {floor}: the kit needs Python {floor} or newer, "
+            "which Ubuntu 24.04 LTS and newer ship (22.04 has 3.10); install Ubuntu Desktop 24.04 LTS or newer")
+
+
+def _version(v):
+    """'3.10.12' -> (3, 10, 12); anything else -> None."""
+    parts = (v or "").split(".")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
 
 
 def overlaps(facts):
@@ -90,9 +117,12 @@ def judge(facts, accept_unproven_ram=False):
     os_id, codename = facts.get("os_id"), facts.get("os_codename")
     if os_id != "ubuntu":
         refusals.append(f"OS is {os_id or 'unknown'}, not ubuntu: the kit installs with apt and runs on "
-                        "NetworkManager (install Ubuntu Desktop 24.04 LTS)")
+                        "NetworkManager (install Ubuntu Desktop 24.04 LTS or newer)")
     elif codename != PROVEN_CODENAME:
         warnings.append(f"Ubuntu {codename or 'unknown'}: the kit is proven on {PROVEN_CODENAME} (24.04) only")
+    py = python_floor_problem(_version(facts.get("python3_version")))
+    if py:
+        refusals.append(py)
     if facts.get("nm_active") != "active" or facts.get("nmcli") != "yes":
         refusals.append(f"NetworkManager is not running (systemctl is-active: {facts.get('nm_active') or 'unknown'}; "
                         f"nmcli: {facts.get('nmcli') or 'unknown'}): host/setup.sh needs it (Ubuntu Desktop has it)")
