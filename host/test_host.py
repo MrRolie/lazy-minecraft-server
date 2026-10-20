@@ -1050,7 +1050,8 @@ CUSTOM_OVERRIDE = '      MODRINTH_MODPACK: "/pack/sky-isles-1.2.0-ch1.mrpack"\n'
 
 def test_backup_of_a_custom_pack_tars_that_pack_and_its_source(tmp_path):
     """A custom pack (docs/kit/CUSTOM-PACK.md): compose runs the override's pack, and pack-custom/ is in no git
-    history, so the backup carries it: the .mrpack, its mods.toml, lock.json and overrides/, and the override."""
+    history, so the backup carries it: the .mrpack, its mods.toml, lock.json, overrides/ and #welcome intro, and the
+    override."""
     import tarfile
     repo, _, env = backup_env(tmp_path, running=False, rcon_ok_after=0)
     (repo / "docker-compose.override.yml").write_text(CUSTOM_OVERRIDE)
@@ -1058,6 +1059,7 @@ def test_backup_of_a_custom_pack_tars_that_pack_and_its_source(tmp_path):
     (repo / "pack-custom" / "overrides" / "config" / "c.json").write_text("{}")
     (repo / "pack-custom" / "mods.toml").write_text("[pack]\n")
     (repo / "pack-custom" / "lock.json").write_text("{}")
+    (repo / "pack-custom" / "welcome-intro.md").write_text("Sky Isles: floating islands.\n")  # discord/sync.py
     res = run_backup(repo, env)
     assert res.returncode == 1 and "sky-isles-1.2.0-ch1.mrpack" in res.stderr  # compose's VE file is not the live one
     (repo / "dist" / "sky-isles-1.2.0-ch1.mrpack").write_bytes(b"pack")
@@ -1066,7 +1068,8 @@ def test_backup_of_a_custom_pack_tars_that_pack_and_its_source(tmp_path):
         names = set(tar.getnames())
         build = tar.extractfile("provenance/build.txt").read().decode()
     assert {"dist/sky-isles-1.2.0-ch1.mrpack", "pack-custom/mods.toml", "pack-custom/lock.json",
-            "pack-custom/overrides/config/c.json", "provenance/docker-compose.override.yml"} <= names
+            "pack-custom/overrides/config/c.json", "pack-custom/welcome-intro.md",
+            "provenance/docker-compose.override.yml"} <= names
     assert "MODRINTH_MODPACK=/pack/sky-isles-1.2.0-ch1.mrpack\n" in build
 
 

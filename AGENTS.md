@@ -252,15 +252,19 @@ first), never near 05:40, and with a fresh `deploy/backup.sh` before any server-
     `--apply`.
 - **Config:** `{config:<name>}` in content is filled from `kit.toml`, resolved up front like `{secret:}`; it is not
   secret. Names (an allowlist, `CONFIG` in `sync.py`): `server_address`, `host_name` (`setup.md`), `pack_name`
-  (the kit `setup.md`: the `[pack]` name of the pack `pack.mode` builds), and `world_status` (`welcome.md`:
-  "being built" until `server.open_date` is set, then "open (since <date>)"). An
+  (the kit `setup.md`: the `[pack]` name of the pack `pack.mode` builds), `pack_intro` (`welcome.md`'s opening:
+  `welcome-intro.md` in that pack's directory, so `pack/welcome-intro.md` for Vanilla Extended; a custom pack
+  without `pack-custom/welcome-intro.md` refuses, never falls back to Vanilla Extended's text, and its shape is
+  checked: one message, at most 1500 characters, no `{secret:}`/`{config:}`/`{attach:}`, every `{#channel}` link
+  a text channel of this server's layout), and `world_status`
+  (`welcome.md`: "being built" until `server.open_date` is set, then "open (since <date>)"). An
   unknown name stops the sync before any API call. Filled from the original server's fixture, `welcome.md` and its
   `setup.md` are byte for byte the text its guild showed before the kit (a test, where its record is present).
 - **Profile:** `kit.toml` `discord.profile` picks the guild's history (`PROFILES` in `sync.py`). `kit`: a fresh
   guild, so `renamed_from` is ignored, `#the-story` is left out (`PROFILES` `drop`) and `#setup` is
   `discord/content/kit/setup.md` (the Modrinth App's current import path and its unknown-modpack warning; a test
   holds its placeholders equal to the original `#setup`'s where that file is present). `welcome.md` is shared
-  (`KIT_SHARED_CONTENT`: it names no instance). Everything else is the one layout. `asus-node`: the original
+  (`KIT_SHARED_CONTENT`: it names no instance); only its opening is the pack's (`pack_intro`). Everything else is the one layout. `asus-node`: the original
   server's guild, the layout and content as written (its story, `renamed_from`). Its fixture, story, `#setup` as
   posted and `discord/posts/` are instance paths (`kit/INSTANCE-PATHS`).
   - **The P6 stop (`profile_guard`, before any API call):** the `asus-node` profile syncs only the asus-node guild
@@ -483,6 +487,8 @@ The `bridge` compose service links the game and the guild. The details are in `b
   (`docs/kit/CUSTOM-PACK.md` "Changing the pack later"): the new `.mrpack` boots first in
   `pack/spike.sh --pack <file> --world <backup tar>` (a throwaway copy of the world), and only then does render
   point the override, which `mc-server.service` boots, at it. A Vanilla Extended instance has no override.
+  `#welcome`'s opening is the pack's too: `pack-custom/welcome-intro.md`, written with the person
+  (`docs/kit/CUSTOM-PACK.md` step 4); sync refuses without it, and `deploy/backup.sh` saves it.
 - **Chapters only add mods.** Removing a mod deletes its blocks and items from the world. A chapter is:
   1. labelled backup
   2. rehearse on a copy

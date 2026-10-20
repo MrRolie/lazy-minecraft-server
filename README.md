@@ -62,7 +62,8 @@ Or tell your Claude the experience you want, or a pack you already know. It rese
 Modrinth (Modrinth only), sized to your laptop's memory, on Vanilla Extended's Minecraft version so
 the Discord bridge still works. The pack must pass the same build checks and a recorded test boot
 ([docs/kit/CUSTOM-PACK.md](docs/kit/CUSTOM-PACK.md)). That proves it builds and boots. Whether it is fun is for
-your group to find out by playing. This custom path has not yet run end to end on a kit host.
+your group to find out by playing. A friend ran this custom path on 2026-10-20 and reported it went smoothly; it
+found one defect (`#welcome` showed Vanilla Extended's text), fixed in this snapshot; its run record is pending.
 
 ## What you need
 
@@ -101,7 +102,9 @@ the docs), except one open finding (below), and no run has gone through those fi
 - No kit run on a real old laptop, so the Wi-Fi fallback, a fixed address, the battery charge cap and the BIOS
   power-on setting are untested.
 - The run stopped world pre-generation early.
-- The custom-pack path has not run end to end.
+- The custom-pack path: a friend ran it on 2026-10-20 and reported it went smoothly; its run record is pending. The
+  defect it found, `#welcome` showing Vanilla Extended's text, is fixed in this snapshot; no run has gone through
+  that fix yet.
 - Game-to-Discord chat was not checked by eye in the run (Discord-to-game was).
 - One open finding: the Nether and End borders reverted once after a cancel and a restart. A gate caught it; it
   has not been reproduced.
@@ -154,7 +157,7 @@ the docs), except one open finding (below), and no run has gone through those fi
 uv run --with pytest --with discord.py==2.7.1 pytest
 ```
 
-On this snapshot (2026-10-18): 1685 pass and 52 skip. Every skip says why: it needs the original server's
+On this snapshot (2026-10-20): 1711 pass and 54 skip. Every skip says why: it needs the original server's
 private record, which is not in this copy. On a machine without Python 3.10, two more tests skip, also with their
 reason. Some tests read git history, so run them in a clone, not a bare download.
 
@@ -168,7 +171,7 @@ or a "codex review" mean those AI passes.
 
 ## This snapshot
 
-A public snapshot of a private repository, taken 2026-10-18 from commit `a08519d`. Dropped, exactly as
+A public snapshot of a private repository, taken 2026-10-20 from commit `7906a0d`. Dropped, exactly as
 `kit/INSTANCE-PATHS` lists: the original server's instance record, its friends' Discord text and posts, and Mikael's
 working notes. A few lines elsewhere were edited where they pointed at those files or at private context, and this
 README and the LICENSE are new. The history stays private.

@@ -129,6 +129,21 @@ side = "both"               # server | client | both
   `python3 kit/render.py` writes `docker-compose.override.yml`, which points the server at this pack and shows its
   name and version in the server list (MOTD).
 
+### The #welcome intro
+
+`#welcome` opens, under its heading "Welcome 👋", with what the game on this server is. Vanilla Extended's opening is
+`pack/welcome-intro.md`. A custom pack's is `pack-custom/welcome-intro.md`, and you write it now, from the brief
+(step 1) and the list (step 3). Friends read it before they join, so write it the way `pack/welcome-intro.md` is
+written: casual and plain, two or three short paragraphs about what the game feels like and what is new in it. Name
+a mod only if friends would know it, and promise nothing the kit cannot ("plays well"). Show it to the person and
+change it until they say ok. If step 5 or 6 later cuts a mod it mentions, fix that line and show them again.
+
+`discord/sync.py` posts it as one message, and refuses before it touches Discord while the file is missing, empty,
+longer than 1500 characters, split by a line holding only `---`, holding a `{secret:}`, `{config:}` or `{attach:}`
+(a `{#channel}` link works, but only to a text channel this server has: the refusal lists them), or a copy of
+Vanilla Extended's. It never falls back to Vanilla Extended's text. The rest of `#welcome` (the house rules, getting
+in, the status line) is the same on every server.
+
 ## 5. Build it with the gates
 
 In P5, `python3 pack/build.py` is the same command as for Vanilla Extended. It locks every mod's exact version in
@@ -178,11 +193,24 @@ Tell them what they have, plainly: the pack's name, the mods (one line each), an
 page. Then carry on with KIT.md: the rest of P5's gates, then P6.
 
 What follows the pack on its own: the server list entry friends get (`servers.dat`), the name in `#setup`, the
-server's MOTD, and the backups (`deploy/backup.sh` also saves `pack-custom/`, since it is in no git history).
+server's MOTD, `#welcome`'s opening (the intro from step 4), and the backups (`deploy/backup.sh` also saves
+`pack-custom/`'s mods.toml, lock.json, overrides and intro, since they are in no git history).
 
-What does not, yet: `#welcome` is text every kit server shares (`discord/content/welcome.md`), and its first
-paragraph describes Vanilla Extended. Do not edit it (it is tracked, and the original server's too). Tell the
-person, so they can say in `#announcements` what their pack is about.
+## Already running a custom pack?
+
+A server set up with a custom pack before 2026-10-20 has no `pack-custom/welcome-intro.md`, and its `#welcome` still
+opens with Vanilla Extended's text. After `git pull`, the first `python3 discord/sync.py` refuses and names that
+file. That is expected, and nothing has been changed yet. Then:
+
+1. Write `pack-custom/welcome-intro.md` with the person, as in step 4 "The #welcome intro" (`pack-custom/mods.toml`
+   holds the mods), and get their ok.
+2. `python3 discord/sync.py`, the dry run. Look for `~ edit bot message in #welcome`: the first message is edited
+   in place, the house rules under it stay as they are, and nothing is deleted or reposted. Any other line comes
+   from another update: read it before going on.
+3. `python3 discord/sync.py --apply`, then `python3 discord/sync.py` again, which must say `0 actions`.
+
+The world, the pack and the server are not touched, so this can happen while friends play. The next nightly backup
+saves the new file.
 
 ## Changing the pack later
 

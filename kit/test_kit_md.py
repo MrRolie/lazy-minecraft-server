@@ -562,7 +562,7 @@ def test_step_7_runs_the_kit_sudoers_tool_not_a_hand_written_line():
 
 
 def ubuntu_floor_problems(steps_text, readme, kit_text):
-    """Which Ubuntu to install (operator 2026-10-18): 24.04 LTS or newer, 24.04 the tested one, newer untested,
+    """Which Ubuntu to install (design decision, 2026-10-18): 24.04 LTS or newer, 24.04 the tested one, newer untested,
     Desktop not Server, 22.04 and older refused (kit/probe.py and kit/record.py refuse python3 under 3.11)."""
     flat = lambda t: " ".join(t.split())  # noqa: E731
     step1 = flat(steps_text[steps_text.index("### 1."):steps_text.index("### 2.")])
@@ -763,3 +763,10 @@ def test_p6_runs_on_the_kit_profile_and_names_the_stop():
     import tomllib
     example = tomllib.loads((KIT / "kit.example.toml").read_text())
     assert example["discord"]["profile"] == "kit"  # P0 copies the example, so a kit starts on the kit profile
+
+
+def test_a_p0_refusal_offers_to_take_the_sudoers_drop_in_back_out():
+    """Step 7 installs the drop-in before P0 can refuse (seat review 2026-10-18: Ubuntu Server passes record.py and
+    stops at P0's NetworkManager refusal), so a refusal leaves the laptop as it was only if Claude offers removal."""
+    refuse = " ".join(section("P0. Probe").split("- **A REFUSE line**")[1].split("\n- ")[0].split())
+    assert "sudo bash ~/minecraft-ai-host/kit/sudoers.sh remove" in refuse

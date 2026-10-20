@@ -14,8 +14,8 @@
 # Tars the world AND the server-side state needed to restore it on a modded
 # server (config, server.properties, whitelist, ops), PLUS the pack record the
 # world depends on: the .mrpack compose runs (tiny; it references Modrinth
-# downloads) and pack/lock.json (a custom pack: also pack-custom/'s mods.toml, lock.json and overrides/, and the
-# docker-compose.override.yml that names it). Mod jars are not tarred — the .mrpack pins them;
+# downloads) and pack/lock.json (a custom pack: also pack-custom/'s mods.toml, lock.json, overrides/ and
+# welcome-intro.md (its #welcome text), and the docker-compose.override.yml that names it). Mod jars are not tarred — the .mrpack pins them;
 # ve-commands (extras/, not on Modrinth) is rebuilt from git + mod/RELEASE.sha256 on restore; the tar's
 # provenance/ records which build that was (docker-compose.yml with its MODS line, mod/RELEASE.sha256, the
 # git commit), so a restore on a fresh checkout knows what to rebuild.
@@ -114,7 +114,7 @@ record=("dist/${PACK_FILE}" pack/lock.json)
 if [ -f "${REPO_DIR}/docker-compose.override.yml" ]; then
   cp "${REPO_DIR}/docker-compose.override.yml" "${PROV}/provenance/"
 fi
-for p in pack-custom/mods.toml pack-custom/lock.json pack-custom/overrides; do
+for p in pack-custom/mods.toml pack-custom/lock.json pack-custom/overrides pack-custom/welcome-intro.md; do
   if [ -e "${REPO_DIR}/${p}" ]; then record+=("$p"); fi
 done
 {

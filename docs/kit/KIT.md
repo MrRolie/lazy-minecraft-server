@@ -80,7 +80,7 @@ Every phase below runs a built, tested tool. What is still open, and what you do
 | SSH on a one-machine install: Ubuntu Desktop has no SSH server and the person has no key on it | `setup.sh` step 8 refuses key-only SSH; P7 asks, and with no SSH wanted the gate is `check.sh --no-ssh` (below) |
 | Rotating the share link after launch | HUMAN-STEPS R1, in the Tailscale console (the token was used once) |
 | An off-host backup | none yet: backups are on the laptop's own disk |
-| A pack other than Vanilla Extended (design decision, 2026-10-14) | On the person's choice at the pack card (P0): `docs/kit/CUSTOM-PACK.md`. Modrinth only, Fabric 26.1.2 / loader 0.19.5, sized to the RAM. Claim only "passes the build/lint gates and booted once in a recorded test; not the path the kit's proof run tested". `#welcome`'s shared text still describes Vanilla Extended: tell the person |
+| A pack other than Vanilla Extended (design decision, 2026-10-14) | On the person's choice at the pack card (P0): `docs/kit/CUSTOM-PACK.md`. Modrinth only, Fabric 26.1.2 / loader 0.19.5, sized to the RAM. Claim only "passes the build/lint gates and booted once in a recorded test; not the path the kit's proof run tested" |
 | The battery charge cap | `mc-charge-cap` writes it at every boot; it is reported "written", never "verified" (drivers round it, and asus-wmi reads back its own cache) |
 
 ## Before P0: get the repo onto the laptop
@@ -137,7 +137,9 @@ python3 kit/record.py end P0
 
 - **A REFUSE line** (root, uid or gid ≠ 1000, not Ubuntu, python3 older than 3.11 (Ubuntu 22.04 or older), no
   NetworkManager connection, a route into `10.213.37.0/24`, under 50 GB free, or a fact it could not read): stop.
-  Tell the person plainly why the kit can't run here as it stands; do not work around it.
+  Tell the person plainly why the kit can't run here as it stands; do not work around it. Step 7 has already
+  installed the sudoers drop-in: offer to take it out (`sudo bash ~/minecraft-ai-host/kit/sudoers.sh remove`), so the
+  laptop is left as it was.
 - **Under 16 GB of RAM** (the probe's floor is 14 GiB of MemTotal, a nominal 16 GB machine): only 16 GB is proven.
   Tell them: "This laptop has N GB. The kit is proven on 16 GB; on less it may run out of memory with several
   friends on, and nobody has measured where the floor is. Do you want to go ahead anyway?" Only on a clear yes,
@@ -368,7 +370,9 @@ bytes, stop and find out why; never move it aside on your own.
 
 This is safe before launch: no friends are in the guild yet. With `discord.profile = "kit"`, the guild gets the
 kit's own content: `#setup` from `discord/content/kit/setup.md` (this server's address and share link) and the
-shared welcome. A kit guild has no `#the-story`. **sync refuses, before any API call,** to give a kit guild the
+shared welcome, which opens with the pack's own intro (`pack/welcome-intro.md`, or a custom pack's
+`pack-custom/welcome-intro.md`: without it sync refuses, naming `docs/kit/CUSTOM-PACK.md` step 4). A kit guild has no
+`#the-story`. **sync refuses, before any API call,** to give a kit guild the
 original server's text (its story, its `#setup`, `discord/posts/`), its guild id or its address, and the
 `asus-node` profile syncs only that server's guild. A refusal here is a stop: never change the profile to get past
 it.

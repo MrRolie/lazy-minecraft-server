@@ -16,8 +16,9 @@ A line `{attach:name}` attaches one named local file (ATTACHMENTS) to that part
 and is removed from the posted text. `pack` = the .mrpack compose runs (a custom pack's override first).
 `{secret:name}` anywhere in content is filled at sync time from discord/.env (SECRETS); the value is
 never printed. `share_link` = TAILSCALE_SHARE_LINK (+ optional TAILSCALE_SHARE_LINK_DATE, YYYY-MM-DD).
-`{config:name}` is filled from kit.toml (CONFIG: server_address, host_name, world_status, pack_name); it is not
-secret.
+`{config:name}` is filled from kit.toml (CONFIG: server_address, host_name, world_status, pack_name, pack_intro); it
+is not secret. pack_intro is #welcome's opening, from the pack pack.mode picks: pack/welcome-intro.md, or a custom
+pack's pack-custom/welcome-intro.md (missing: sync refuses).
 Env (discord/.env or environment): DISCORD_TOKEN. The guild id and the bridge bot id come from kit.toml
 (discord.guild_id, discord.bridge_bot_id; layout.toml names the bridge bot "bridge"). kit.toml discord.profile
 picks the guild's history (PROFILES), and discord.invite_lockdown = true makes sync turn Create Invite off for
@@ -341,6 +342,52 @@ def world_status(cfg):
             "New chapters get announced in {#announcements}.")
 
 
+# #welcome's opening, under its shared heading: what the game on this server is. It belongs to the pack, so it lives
+# beside the pack's mods.toml: pack/welcome-intro.md (Vanilla Extended, tracked) or pack-custom/welcome-intro.md (a
+# custom pack: written with the person, docs/kit/CUSTOM-PACK.md step 4; deploy/backup.sh saves it).
+INTRO_NAME = "welcome-intro.md"
+INTRO_MAX = 1500  # the heading and the resolved {#channel} links share its message, which Discord caps at 2000
+INTRO_FIX = ('write it with the person (docs/kit/CUSTOM-PACK.md, step 4, "The #welcome intro"), then run sync '
+             "again")
+
+
+def intro_where(cfg):
+    """-> (the pack directory pack.mode picks, the intro's name for a message, the fix a refusal names)."""
+    d = _kitconfig().pack_dir(cfg, REPO)
+    fix = (INTRO_FIX if cfg["pack"]["mode"] == "custom"  # Vanilla Extended's is tracked: a damaged checkout
+           else f"it is tracked: restore it with git checkout -- pack/{INTRO_NAME}")
+    return d, f"{d.name}/{INTRO_NAME}", fix
+
+
+def pack_intro(cfg):
+    """{config:pack_intro}: <the pack directory pack.mode picks>/welcome-intro.md, stripped. Fail-closed: a missing
+    file refuses (a custom server never falls back to Vanilla Extended's text), and so does a shape that would not
+    post as one plain message. Its {#channel} links are checked against the layout in content_inputs."""
+    d, where, fix = intro_where(cfg)
+    try:
+        text = (d / INTRO_NAME).read_text().strip()
+    except FileNotFoundError:
+        raise ValueError(f"#welcome: {where} is missing, so #welcome cannot say what this server's game is; "
+                         f"{fix}. Sync never posts Vanilla Extended's text for another pack") from None
+    except OSError as e:
+        raise ValueError(f"#welcome: cannot read {where} ({e.strerror}); {fix}") from None
+    problems = []
+    if not text:
+        problems.append("it is empty")
+    if len(text) > INTRO_MAX:
+        problems.append(f"it is {len(text)} characters (at most {INTRO_MAX})")
+    if re.search(r"^---[ \t]*$", text, re.M):
+        problems.append("a line with only --- would split it into two messages")
+    if re.search(r"\{(?:secret|config|attach):", text):
+        problems.append("{secret:}, {config:} and {attach:} are not filled in it (a {#channel} link is)")
+    ve = _kitconfig().VE_DIR / INTRO_NAME
+    if cfg["pack"]["mode"] == "custom" and ve.is_file() and text == ve.read_text().strip():
+        problems.append("it is Vanilla Extended's own text")
+    if problems:
+        raise ValueError(f"#welcome: {where}: {'; '.join(problems)}; {fix}")
+    return text
+
+
 # {config:name} -> its value from the validated kit.toml. An allowlist, never an arbitrary kit.toml path.
 CONFIG = {
     "server_address": lambda cfg: cfg["tailscale"]["server_address"],
@@ -348,6 +395,8 @@ CONFIG = {
     "world_status": world_status,
     # the [pack] name of the pack this instance builds (pack.mode): the name servers.dat puts in the friends' list
     "pack_name": lambda cfg: _kitconfig().pack_section(_kitconfig().pack_dir(cfg, REPO))["name"],
+    # what that pack is about: #welcome's opening (pack_intro)
+    "pack_intro": pack_intro,
 }
 
 
@@ -560,6 +609,14 @@ def content_inputs(layout, env, today, cfg):
                     name = take_attach(part)[1]
                     if name and name not in files:
                         files[name] = resolve_attachment(name)
+    if "pack_intro" in config:  # a link the layout has no channel for would wait for that channel forever (full_plan)
+        text_channels = sorted(ch["name"] for c in layout["categories"] for ch in c["channels"] if ch["type"] == "text")
+        unknown = sorted({n for n in LINK.findall(config["pack_intro"]) if n not in text_channels})
+        if unknown:
+            where, fix = intro_where(cfg)[1:]
+            raise ValueError(f"#welcome: {where} links {', '.join('{#' + n + '}' for n in unknown)}, which this "
+                             f"server has no text channel for (its text channels: {', '.join(text_channels)}); "
+                             f"{fix}")
     return files, secrets, config, warnings
 
 

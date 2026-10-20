@@ -414,6 +414,16 @@ class FakeGuild:
             self.msgs.setdefault(m.group(1), []).append(
                 {"id": str(self.nid), "author": {"id": BOT}, "content": body["content"], "attachments": atts})
             return {"id": str(self.nid)}
+        m = re.fullmatch(r"/channels/(\d+)/messages/(\d+)", path)
+        if m and method in ("PATCH", "DELETE"):  # an edit in place keeps the message (its id, its place)
+            msgs = self.msgs.get(m.group(1), [])
+            msg = next(x for x in msgs if x["id"] == m.group(2))
+            if method == "DELETE":
+                msgs.remove(msg)
+                return None
+            msg["content"] = body["content"]
+            msg["attachments"] = [{"id": "1", "filename": file["filename"], "size": file["size"]}] if file else []
+            return msg
         raise AssertionError(f"unexpected {method} {path}")
 
     def writes(self):
@@ -1348,10 +1358,170 @@ def test_the_pack_name_is_the_pack_this_instance_builds(tmp_path, monkeypatch):
     assert sync.CONFIG["pack_name"](custom) == "Sky Isles"
 
 
+# ── #welcome's opening is the pack's ({config:pack_intro}) ──────────────────────────────────────────────────────
+# Field report 2026-10-20: a friend's custom-pack guild showed Vanilla Extended in #welcome, which was shared text.
+
+VE_INTRO = (sync.REPO / "pack" / sync.INTRO_NAME).read_text().strip()
+CUSTOM_MODS = '[pack]\nname = "Sky Isles"\nversion = "1.2.0"\nminecraft = "26.1.2"\nfabric_loader = "0.19.5"\n'
+SKY = ("Sky Isles is floating islands and long rope bridges. Bring blocks, a bucket, and a friend who doesn't look "
+       "down. Getting in is in {#setup}.")
+
+
+def custom_repo(tmp_path, monkeypatch, intro=SKY):
+    """A checkout with a custom pack (pack-custom/: mods.toml, and the intro unless None) -> its kit config."""
+    (tmp_path / "pack-custom").mkdir(exist_ok=True)
+    (tmp_path / "pack-custom" / "mods.toml").write_text(CUSTOM_MODS)
+    if intro is not None:
+        (tmp_path / "pack-custom" / sync.INTRO_NAME).write_text(intro + "\n")
+    monkeypatch.setattr(sync, "REPO", tmp_path)
+    return kit_cfg(**{"pack.mode": "custom"})
+
+
+def test_welcome_opens_with_the_pack_intro_under_the_shared_heading():
+    head, rules = _filled("welcome.md", CFG).split("\n---\n")  # example.toml: Vanilla Extended
+    assert head == "# Welcome 👋\n\n" + VE_INTRO and "**Vanilla Extended**" in VE_INTRO
+    assert rules.startswith("**House rules**")
+
+
+@needs_record
+@pytest.mark.parametrize("opened", [None, datetime.date(2026, 10, 20)])
+def test_a_vanilla_extended_kit_welcome_is_the_asus_node_one_but_its_status_line(opened):
+    """The byte gate for a Vanilla Extended kit guild: #welcome as asus-node's guild shows it (the golden), with only
+    the status line its own. (asus-node's own: test_templated_content_under_the_asus_node_fixture_...)"""
+    golden, asus_status = (GOLDEN / "welcome.md").read_text(), sync.world_status(asus_cfg())
+    assert golden.count(asus_status) == 1
+    cfg = kit_cfg(**{"server.open_date": opened})
+    assert _filled("welcome.md", cfg) == golden.replace(asus_status, sync.world_status(cfg))
+
+
+def test_a_custom_pack_welcome_opens_with_its_own_intro(tmp_path, monkeypatch):
+    ve = _filled("welcome.md", kit_cfg())
+    custom = _filled("welcome.md", custom_repo(tmp_path, monkeypatch))
+    assert custom.startswith("# Welcome 👋\n\n" + SKY + "\n---\n") and "Vanilla Extended" not in custom
+    assert custom.split("\n---\n")[1] == ve.split("\n---\n")[1]  # house rules, getting in, status: shared
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_a_custom_pack_without_its_intro_refuses_before_any_api_call(tmp_path, monkeypatch, fake_pack, apply):
+    """Fail-safe: never Vanilla Extended's text for another pack; the refusal names the file and the fix."""
+    cfg = custom_repo(tmp_path, monkeypatch, intro=None)
+    _sync_refused(cfg, r"#welcome: pack-custom/welcome-intro\.md is missing.*docs/kit/CUSTOM-PACK\.md, step 4, "
+                       r'"The #welcome intro".*never posts Vanilla Extended\'s text', apply=apply)
+
+
+def test_a_vanilla_extended_checkout_without_its_intro_is_told_to_restore_it(tmp_path, monkeypatch):
+    """pack/welcome-intro.md is tracked: its absence is a damaged checkout, not a pack conversation to have."""
+    monkeypatch.setattr(sync, "REPO", tmp_path)
+    with pytest.raises(ValueError, match=r"pack/welcome-intro\.md is missing.*git checkout -- pack/welcome-intro\.md"):
+        sync.pack_intro(kit_cfg())
+
+
+INTRO_SHAPES = {  # guard -> (an intro only that guard refuses, what its refusal says)
+    "empty": ("", "it is empty"),
+    "long": ("x" * (sync.INTRO_MAX + 1), f"characters \\(at most {sync.INTRO_MAX}\\)"),
+    "split": ("Sky Isles.\n---\nMore below.", "split it into two messages"),
+    "placeholder": ("Join with {secret:share_link}", "are not filled in it"),
+    "ve_copy": (VE_INTRO, "Vanilla Extended's own text"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(INTRO_SHAPES))
+def test_a_custom_intro_of_the_wrong_shape_is_refused(tmp_path, monkeypatch, name):
+    intro, why = INTRO_SHAPES[name]
+    cfg = custom_repo(tmp_path, monkeypatch, intro)
+    with pytest.raises(ValueError, match=why) as e:
+        sync.pack_intro(cfg)
+    assert "pack-custom/welcome-intro.md" in str(e.value) and "CUSTOM-PACK.md, step 4" in str(e.value)
+
+
+@pytest.mark.parametrize("intro", [SKY, "y" * sync.INTRO_MAX, "Stuck? Ask in {#help}."])
+def test_a_custom_intro_of_a_good_shape_is_its_own_text(tmp_path, monkeypatch, intro):
+    assert sync.pack_intro(custom_repo(tmp_path, monkeypatch, "\n" + intro + "\n\n")) == intro
+
+
+INTRO_LINK_GUARD = "        if unknown:\n"  # content_inputs: an intro link this server's layout has no text channel for
+
+
+@pytest.mark.parametrize("link", ["general-chat", "the-story"])  # no such channel; one the kit profile drops
+@pytest.mark.parametrize("apply", [False, True])
+def test_a_custom_intro_linking_a_channel_the_server_lacks_refuses_before_any_api_call(tmp_path, monkeypatch,
+                                                                                       fake_pack, apply, link):
+    """Without the check, full_plan reads the unknown link as a channel not created yet: the dry run says 0 actions
+    while #welcome keeps its old text, and --apply ends in 'did not converge' naming neither the file nor the fix
+    (review 2026-10-20)."""
+    cfg = custom_repo(tmp_path, monkeypatch, f"Sky Isles is floating islands. Ask in {{#{link}}}.")
+    _sync_refused(cfg, rf"#welcome: pack-custom/welcome-intro\.md links \{{#{link}\}}, which this server has no text "
+                       r"channel for \(its text channels: .*\bhelp\b.*\); write it with the person "
+                       r"\(docs/kit/CUSTOM-PACK\.md, step 4", apply=apply)
+
+
+def test_the_intro_link_guard_catches_its_mutant(tmp_path, monkeypatch):
+    assert SOURCE.count(INTRO_LINK_GUARD) == 1, "stale or ambiguous mutation pattern"
+    cfg = custom_repo(tmp_path, monkeypatch, "Sky Isles. Ask in {#general-chat}.")
+    mod = _load_sync_copy(tmp_path, SOURCE.replace(INTRO_LINK_GUARD, "        if False:\n"), "sync_mut_intro_link")
+    layout = mod.load_layout((sync.HERE / "layout.toml").read_text(), sync.kit_bots(cfg["discord"]), "kit")
+    config = mod.content_inputs(layout, _env(), TODAY, cfg)[2]  # disabled, the guard no longer refuses
+    assert "{#general-chat}" in config["pack_intro"]
+
+
+INTRO_MUTANTS = {  # guard -> (the line as written, the guard disabled)
+    "missing": ("    except FileNotFoundError:\n", "    except ZeroDivisionError:\n"),
+    "empty": ("    if not text:\n", "    if False:\n"),
+    "long": ("    if len(text) > INTRO_MAX:\n", "    if False:\n"),
+    "split": ('    if re.search(r"^---[ \\t]*$", text, re.M):\n', "    if False:\n"),
+    "placeholder": ('    if re.search(r"\\{(?:secret|config|attach):", text):\n', "    if False:\n"),
+    "ve_copy": ('    if cfg["pack"]["mode"] == "custom" and ve.is_file() and text == ve.read_text().strip():\n',
+                "    if False:\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(INTRO_MUTANTS))
+def test_each_intro_guard_catches_its_mutant(tmp_path, monkeypatch, name):
+    guard, mutant = INTRO_MUTANTS[name]
+    assert SOURCE.count(guard) == 1, f"stale or ambiguous mutation pattern for {name}"
+    intro, why = INTRO_SHAPES.get(name, (None, "is missing"))
+    cfg = custom_repo(tmp_path, monkeypatch, intro)
+    mod = _load_sync_copy(tmp_path, SOURCE.replace(guard, mutant), f"sync_mut_intro_{name}")
+    try:
+        mod.pack_intro(cfg)
+        said = ""
+    except ValueError as e:
+        said = str(e)
+    assert not re.search(why, said)  # disabled, the guard no longer says it
+
+
+def test_a_custom_guild_holding_the_vanilla_extended_welcome_gets_one_edit_in_place(tmp_path, monkeypatch,
+                                                                                   fake_pack, capsys):
+    """The friend's guild after the update: #welcome as the shared text posted it (Vanilla Extended's opening, two
+    messages). The intro is still one message, so sync edits that message in place: same id, same place, the house
+    rules message untouched, nothing deleted or reposted, then 0 actions."""
+    cfg = custom_repo(tmp_path, monkeypatch)
+    api = FakeGuild()
+    monkeypatch.setitem(sync.CONFIG, "pack_intro", lambda cfg: VE_INTRO)  # what #welcome said before this change
+    assert sync.cmd_sync(api, GID, True, _env(), TODAY, cfg=cfg) == 0
+    welcome = next(c["id"] for c in api.channels if c["name"] == "welcome")
+    before = copy.deepcopy(api.msgs[welcome])
+    assert len(before) == 2 and "Vanilla Extended" in before[0]["content"]
+    monkeypatch.setitem(sync.CONFIG, "pack_intro", sync.pack_intro)
+    capsys.readouterr()
+    assert sync.cmd_sync(api, GID, False, _env(), TODAY, cfg=cfg) == 2  # dry run with actions
+    out = capsys.readouterr().out.splitlines()
+    assert [ln for ln in out if ln[:1] in "+-~"] == ["~ edit bot message in #welcome"] and out[-1].startswith("1 act")
+    n = len(api.writes())
+    assert sync.cmd_sync(api, GID, True, _env(), TODAY, cfg=cfg) == 0
+    assert [(m, p) for m, p, _ in api.writes()[n:]] == [("PATCH", f"/channels/{welcome}/messages/{before[0]['id']}")]
+    after = api.msgs[welcome]
+    assert [m["id"] for m in after] == [m["id"] for m in before] and after[1] == before[1]
+    assert "Sky Isles is floating islands" in after[0]["content"] and "Vanilla Extended" not in after[0]["content"]
+    capsys.readouterr()
+    assert sync.cmd_sync(api, GID, False, _env(), TODAY, cfg=cfg) == 0
+    assert capsys.readouterr().out.splitlines()[-1].startswith("0 actions")
+
+
 def test_shared_content_names_no_instance():
-    """KIT_SHARED_CONTENT goes to every guild: it may hold no instance's address, host or story."""
-    for name in sync.KIT_SHARED_CONTENT:
-        text = (sync.HERE / "content" / name).read_text()
+    """KIT_SHARED_CONTENT goes to every guild: it may hold no instance's address, host or story. So does Vanilla
+    Extended's #welcome intro, in every guild that runs it."""
+    for text in [*((sync.HERE / "content" / name).read_text() for name in sync.KIT_SHARED_CONTENT), VE_INTRO]:
         assert ".ts.net" not in text and "asus-node" not in text and "Mike" not in text
         assert CFG["tailscale"]["server_address"] not in text
 
