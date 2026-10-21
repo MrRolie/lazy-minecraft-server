@@ -523,15 +523,34 @@ def load_env():
 KIT_TOML = None  # None: <repo>/kit.toml or $MC_KIT_TOML (kit/kitconfig.py); the tests use kit/fixtures/example.toml
 
 
+def refuse_no_discord():
+    """Exit when kit.toml says discord.enabled = false, reading that one key as written (kitconfig.discord_choice), so
+    main says "no Discord" before it asks discord/.env for a token that server never had."""
+    if str(REPO / "kit") not in sys.path:
+        sys.path.insert(0, str(REPO / "kit"))
+    import kitconfig
+    try:
+        on = kitconfig.discord_choice(KIT_TOML)
+    except kitconfig.ConfigError as e:
+        sys.exit(f"discord/sync.py: {e}")
+    if not on:
+        sys.exit("discord/sync.py: kit.toml says discord.enabled = false: this server has no Discord, so there is "
+                 "no guild to sync or bootstrap (docs/kit/KIT.md \"With no Discord\")")
+
+
 def load_kit_config():
     """kit.toml, validated. The guild id and the bridge bot id live there and nowhere else."""
     if str(REPO / "kit") not in sys.path:
         sys.path.insert(0, str(REPO / "kit"))  # kit/ only: the repo root would make `discord` this directory
     import kitconfig
     try:
-        return kitconfig.load(KIT_TOML)
+        cfg = kitconfig.load(KIT_TOML)
     except kitconfig.ConfigError as e:
         sys.exit(f"discord/sync.py: {e}")
+    if not kitconfig.discord_enabled(cfg):
+        sys.exit("discord/sync.py: kit.toml says discord.enabled = false: this server has no Discord, so there is "
+                 "no guild to sync or bootstrap (docs/kit/KIT.md \"With no Discord\")")
+    return cfg
 
 
 def guild_id(kit, env):
@@ -857,6 +876,7 @@ def main():
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("post", nargs="*", help="post <channel> <file>: one-off, unmanaged message")
     args = ap.parse_args()
+    refuse_no_discord()  # before discord/.env: a server with no Discord has no token to ask for
     env = load_env()
     cfg = load_kit_config()
     gid = guild_id(cfg["discord"], env)  # before the client exists: a refusal makes no call at all

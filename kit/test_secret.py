@@ -382,3 +382,20 @@ def test_each_guard_catches_its_mutant(tmp_path, name):
     (repo2 / "discord").mkdir(parents=True)
     mod = load(SOURCE.replace(guard, mutant), tmp_path, f"secret_mut_{name}")
     assert scenario(mod, repo2), name
+
+
+@pytest.mark.parametrize("toml,says,not_says", [
+    (None, "python3 discord/sync.py (dry run)", "friends.py"),
+    ("[discord]\nenabled = false\n", "python3 kit/friends.py", "sync.py"),
+    ("not [toml", "with no Discord", None),
+])
+def test_the_share_link_names_the_next_step_the_choice_needs(repo, tmp_path, monkeypatch, toml, says, not_says):
+    """R1 with no Discord goes on to the friend message, never to sync.py (which refuses there)."""
+    kit = tmp_path / "kit.toml"
+    if toml is not None:
+        kit.write_text(toml)
+    monkeypatch.setenv("MC_KIT_TOML", str(kit))
+    msg = secret.run("share-link", repo, read=feed(LINK_NEW))
+    assert says in msg and LINK_NEW not in msg
+    if not_says:
+        assert not_says not in msg.split("Next:")[1]

@@ -1,7 +1,7 @@
 # Turn an old laptop into a Minecraft server for your friends
 
 Claude Code does the setup. You do the handful of things only a person can do: install Ubuntu, sign in to a few
-accounts, click a few buttons in Discord and Tailscale. At the end your friends play a modded Minecraft world on a
+accounts, click a few buttons in Tailscale (and in Discord, if your group wants a Discord server: it is optional). At the end your friends play a modded Minecraft world on a
 server that looks after itself: **Vanilla Extended** (more to explore, still feels like Minecraft), or a different
 pack you pick with Claude.
 
@@ -19,7 +19,10 @@ Ubuntu to friends' invite link. What it found is fixed (in code with tests, or i
   newer should work but is untested. Desktop, not Server, and not 22.04 or older: the kit stops on those.
 - **A USB stick of 12 GB or more**, and another computer to make it on.
 - **A Claude Pro or Max plan.** The free plan doesn't include Claude Code.
-- **A Discord account**, and for each friend: Minecraft Java Edition, a Discord account and a free Tailscale account.
+- **A Discord account, only if you want Discord.** Claude asks early on: with Discord your group gets a Discord
+  server with game chat, self-service whitelisting and alerts; with no Discord, Claude writes you one message to send
+  your friends however you talk, and you add each friend by name. For each friend: Minecraft Java Edition and a free
+  Tailscale account (and a Discord account, with Discord).
 - The laptop stays plugged in and switched on. It never sleeps; closing the lid is fine.
 
 ## How long it takes
@@ -29,26 +32,29 @@ About a day from start to friends playing, most of it the laptop working on its 
 | Part | Your time | Wall clock |
 |---|---|---|
 | Ubuntu USB stick and install | about 45 min | about 45 min |
-| Claude Code, Discord, Tailscale | about 30 min, in short bursts | about 1 h |
+| Claude Code, Discord (if you want it), Tailscale | about 30 min, in short bursts (about 15 with no Discord) | about 1 h |
 | Building and starting the server | nothing | about 30 min |
 | Pre-generating the world, so exploring never stutters | nothing | **about 8 hours** on the original laptop |
-| A test restart and the chat-bridge check | a few minutes | about 15 min |
+| A test restart and the chat-bridge check (no bridge with no Discord) | a few minutes | about 15 min |
 
 Estimates, except the world pre-generation (about 7.7 h on the original laptop). On the test run, the Discord part
 took about 15 minutes and the Tailscale part about 12.
 
 ## What you do, and what Claude does
 
-**You** do about 20 things once (19 if you already have Discord) (`docs/kit/HUMAN-STEPS.md` lists each one, with where to click). Each friend does 10
-things once. After that, two things come back now and then: a fresh share link for a new friend, and logging in to
-Claude Code again when it asks.
+**You** do about 20 things once (19 if you already have Discord, 12 with no Discord) (`docs/kit/HUMAN-STEPS.md`
+lists each one, with where to click). Each friend does 10 things once (9 with no Discord). After that, two things
+come back now and then: a fresh share link for a new friend, and logging in to Claude Code again when it asks. With
+no Discord there is a third: adding each new friend to the server by their Minecraft name.
 
 **Claude** does the rest, and tells you when it needs you:
 - checks the laptop can do it, and stops with a plain reason if it can't
 - asks which game you want: Vanilla Extended, or a different pack you pick together
 - installs Docker and Tailscale, and sets up the private network your friends join through (nothing is opened to
   the internet)
-- builds the Discord server's channels, the chat bridge between the game and Discord, and the alerts channel
+- with Discord: builds the Discord server's channels, the chat bridge between the game and Discord, and the alerts
+  channel. With no Discord: writes the message you send your friends. Alerts are then off: the server still
+  repairs itself, but nobody is told when something fails
 - sets the laptop up to run unattended: never sleep, survive network trouble, update itself at night, back up the
   world every night, restart the server if it hangs
 - starts Minecraft, makes you the server operator, and pre-generates the world
@@ -76,7 +82,8 @@ For maintainers, the tools KIT.md runs, phase by phase:
 | step 7 | `kit/sudoers.sh` (the kit user's sudo drop-in: install, check, remove) |
 | P0 | `kit/probe.sh` + `kit/probe.py` (read-only probe and its refusals; writes `kit/probe.json`) |
 | step 23 (after P0) | the pack card; a custom pack follows `docs/kit/CUSTOM-PACK.md` |
-| P1, P6, P12 | `discord/bootstrap.py` (discover, intents, clean, webhook, invite) and `discord/sync.py` (the guild as code) |
+| P1, P6, P12 | `discord/bootstrap.py` (discover, intents, clean, webhook, invite) and `discord/sync.py` (the guild as code); with no Discord, P1, P6 and P11 are skipped (`kit/record.py skip`) |
+| P12, R1 (no Discord) | `kit/friends.py` (the friend message, `~/minecraft-friend-message.txt`, mode 600, text `kit/friend-message.txt`; it prints only the path, never the share link) |
 | steps 12, 15, 18, R1 | `kit/secret.py` (the token and share-link hand-off: a hidden prompt, a shape check, the key's line replaced under the env files' lock) |
 | P2 | `kit/packages.sh` (Docker Engine and Tailscale from their apt repositories, pinned keys) |
 | P3 | `kit/tailscale.py` (status; setup: policy, tag, key expiry, share link; the token used once) |

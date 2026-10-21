@@ -28,8 +28,9 @@ the instance's host.
   update, a mod add or remove, a config edit, a restore, or a version bump.
 - **The world depends on its pack.** A world tar is dead data without the exact pack version it was generated
   with. Archive the pack artifact (or its pinned version ID) alongside the world.
-- **Mid-world pack changes are "chapters".** They land between play sessions, are announced in
-  `#announcements`, and come with a backup. Nobody logs in to find the game changed under them.
+- **Mid-world pack changes are "chapters".** They land between play sessions, are announced to the players first
+  (in `#announcements` when the server uses Discord), and come with a backup. Nobody logs in to find the game
+  changed under them.
 - **No stopping, restarting or migrating while friends are online** (`rcon-cli list` first) without a heads-up.
 
 ## Access stays private

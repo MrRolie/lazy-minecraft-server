@@ -14,6 +14,9 @@ Claude runs it as the kit user at each point docs/kit/KIT.md names:
   python3 kit/record.py end P3 [--accept "<why>"]    the phase ends; its status is DERIVED from its gates
   python3 kit/record.py end P3 --accept "<why>"  right after a failed `end P3`, before anything else begins: the
                                                  person accepts that failure (the gates are not re-run)
+  python3 kit/record.py skip P1                  a Discord-only phase (DISCORD_PHASES) on a server with no Discord:
+                                                 refused unless kit.toml says discord.enabled = false; recorded as
+                                                 "skipped", never as passed
   python3 kit/record.py status                   where the run is
   python3 kit/record.py began P11                print when P11 last began (UTC, 2026-10-16T03:07:48Z), for a gate
                                                  that reads logs since then: docker compose logs --since takes it
@@ -38,7 +41,13 @@ recurring (R) step can be logged, but it is listed on its own line and never cou
 when every required one-time step was logged (KIT.md logs steps 1-6 with --retro at the start): `finish` refuses
 while any is missing, so the run stays open and the step can still be logged; `finish --incomplete` seals it anyway,
 and record.md then headlines N as INCOMPLETE, a floor. `status` names the required steps not logged yet.
-Files: kit/runs/<run id>/ (gitignored; $MC_KIT_RUNS overrides, for tests). Stdlib only; it needs no kit.toml.
+No Discord (kit.toml discord.enabled = false, chosen at human step 23): the Discord-only phases are `skip`ped, and
+the steps under HUMAN-STEPS.md's "## You, once: Discord" heading are not required. `skip`, `status` and `finish` read
+that one key from kit.toml as written (kit/kitconfig.py discord_choice; no kit.toml yet reads as Discord, the
+stricter mode), `begin` of a Discord-only phase reads it too and refuses with no Discord (skip it), and `finish`
+refuses a run with a phase still skipped while kit.toml says Discord.
+Files: kit/runs/<run id>/ (gitignored; $MC_KIT_RUNS overrides, for tests). Stdlib only; only skip, status, finish
+and begin P1/P6/P11 read kit.toml (one key), and every other command needs none.
 It is the first kit command a run executes (KIT.md "Before P0"), so it refuses a python3 under the kit's floor
 (kit/probe.py PYTHON_FLOOR, 3.11) with a plain reason, and must itself run on an older one: stdlib only, no
 3.11-only syntax or imports.
@@ -63,6 +72,12 @@ STEPS_MD = REPO / "docs" / "kit" / "HUMAN-STEPS.md"
 PHASE_HEAD = re.compile(r"^## (P\d+)\. (.+?)\s*$", re.M)
 STEP_HEAD = re.compile(r"^### ((?:[FR])?\d+)\. (.+?)\s*$", re.M)
 PASSING = ("pass", "pass-observed", "accepted-fail")
+SKIPPED = "skipped"  # a Discord-only phase on a server with no Discord: lets the next phase begin, never a pass
+# The phases that do nothing but Discord: the guild and its bots (P1), its channels and webhook (P6), the chat bridge
+# (P11). KIT.md gives `record.py skip` in exactly these phases' sections (kit/test_record.py is the alarm).
+DISCORD_PHASES = ("P1", "P6", "P11")
+DISCORD_SECTION = "You, once: Discord"  # HUMAN-STEPS.md: the steps under this heading are Discord's alone
+NO_DISCORD = "no Discord (kit.toml discord.enabled = false)"
 # Shapes that must never reach a record that leaves the machine.
 SECRETS = (
     ("a Discord token", re.compile(r"[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}")),
@@ -115,10 +130,32 @@ def load_steps(text):
     return headings(text, STEP_HEAD, "human step (### <id>. Title)")
 
 
-def required_steps(steps):
+def required_steps(steps, without=()):
     """The host owner's one-time steps every run must log: a digit id whose title is not marked "(Optional)",
-    "(Conditional)" or "(Most people skip this)" (HUMAN-STEPS.md puts the mark in parentheses at the start)."""
-    return [s for s, title in steps.items() if s.isdigit() and not title.startswith("(")]
+    "(Conditional)" or "(Most people skip this)" (HUMAN-STEPS.md puts the mark in parentheses at the start), and
+    not in `without` (the Discord steps, on a server with no Discord: discord_steps)."""
+    return [s for s, title in steps.items() if s.isdigit() and not title.startswith("(") and s not in without]
+
+
+def discord_steps(text):
+    """The step ids under HUMAN-STEPS.md's "## You, once: Discord" heading, up to the next "## " heading. Refuses a
+    page without that heading: a missing section would quietly require nothing less on a no-Discord run."""
+    start = text.find(f"\n## {DISCORD_SECTION}\n")
+    if start == -1:
+        raise RecordError(f'HUMAN-STEPS.md has no "## {DISCORD_SECTION}" heading')
+    end = text.find("\n## ", start + 1)
+    ids = list(headings(text[start:end if end != -1 else len(text)], STEP_HEAD, "Discord step"))
+    return tuple(ids)
+
+
+def discord_on(kit_toml=None):
+    """kit.toml's choice as written (kitconfig.discord_choice). Imported here, not at the top: kitconfig needs
+    tomllib (3.11+), and record.py must reach its python-floor refusal on an older python3."""
+    import kitconfig
+    try:
+        return kitconfig.discord_choice(kit_toml)
+    except kitconfig.ConfigError as e:
+        raise RecordError(str(e)) from None
 
 
 def looks_secret(text):
@@ -145,11 +182,13 @@ def phase_state(events):
             open_phase = None
         elif e["kind"] == "accept":  # a failure accepted after its phase ended (cmd_end)
             status[e["phase"]] = "accepted-fail"
+        elif e["kind"] == "skip":  # a Discord-only phase with no Discord (cmd_skip)
+            status[e["phase"]] = SKIPPED
     return open_phase, status
 
 
 def last_phase_event(events):
-    return next((e for e in reversed(events) if e["kind"] in ("begin", "end", "accept")), None)
+    return next((e for e in reversed(events) if e["kind"] in ("begin", "end", "accept", "skip")), None)
 
 
 def gates_since_begin(events, phase):
@@ -182,7 +221,7 @@ def check_begin(events, phase, phases):
     for p in phases:
         if p == phase:
             break
-        if status.get(p) not in PASSING:
+        if status.get(p) not in PASSING + (SKIPPED,):
             raise RecordError(f"{p} has not passed (status: {status.get(p, 'not run')}); phases run in order")
 
 
@@ -199,7 +238,8 @@ def duration(a, b):
     return f"{h}h{rem // 60:02d}m" if h else f"{rem // 60}m{rem % 60:02d}s"
 
 
-def summarize(events, phases, steps):
+def summarize(events, phases, steps, without=()):
+    """without: the Discord steps when the run has no Discord (discord_steps), else ()."""
     start = next(e for e in events if e["kind"] == "start")
     fin = next((e for e in events if e["kind"] == "finish"), None)
     rows, cur = [], None
@@ -216,6 +256,9 @@ def summarize(events, phases, steps):
         elif e["kind"] == "accept":
             row = next(r for r in reversed(rows) if r["phase"] == e["phase"])
             row.update(status="accepted-fail", accepted=e["accepted"])
+        elif e["kind"] == "skip":
+            rows.append({"phase": e["phase"], "title": phases.get(e["phase"], "?"), "begin": e["t"], "gates": [],
+                         "end": e["t"], "status": SKIPPED, "why": e["why"], "accepted": "", "took": "-"})
     humans = [e for e in events if e["kind"] == "human"]
     seen = sorted({e["step"] for e in humans if e.get("step")}, key=lambda s: list(steps).index(s))
     planned_seen = [s for s in seen if s.isdigit()]  # the host owner's one-time steps: what N counts
@@ -223,7 +266,14 @@ def summarize(events, phases, steps):
     unplanned = [e for e in humans if not e.get("step")]
     _, status = phase_state(events)
     last = phases and list(phases)[-1]
-    complete = all(status.get(p) in ("pass", "pass-observed") for p in phases)
+    skipped = [p for p in phases if status.get(p) == SKIPPED]
+    complete = all(status.get(p) in ("pass", "pass-observed", SKIPPED) for p in phases)
+    outcome = ("complete" if complete else
+               "complete, with accepted failures" if all(status.get(p) in PASSING + (SKIPPED,) for p in phases) else
+               f"incomplete (last ended: {max(status, key=lambda p: int(p[1:])) if status else 'none'}; "
+               f"{last} needed)")
+    if skipped:  # never a bare "complete": the record says which phases did not run, and why
+        outcome += f"; skipped, {NO_DISCORD}: {', '.join(skipped)}"
     return {
         "run": start["run"],
         "host": start["host"],
@@ -231,20 +281,19 @@ def summarize(events, phases, steps):
         "sha_finish": fin["sha"] if fin else None, "dirty_finish": fin["dirty"] if fin else None,
         "started": start["t"], "finished": fin["t"] if fin else None,
         "took": duration(start["t"], fin["t"]) if fin else None,
-        "outcome": ("complete" if complete else
-                    "complete, with accepted failures" if all(status.get(p) in PASSING for p in phases) else
-                    f"incomplete (last ended: {max(status, key=lambda p: int(p[1:])) if status else 'none'}; "
-                    f"{last} needed)"),
+        "outcome": outcome,
+        **({"discord": False} if without else {}),  # only with no Discord: a Discord run's record is today's
         "phases": rows,
         "human": {
             "planned_seen": planned_seen,
             "other_seen": other_seen,
             # the host owner's one-time steps only: friends' (F) and recurring (R) steps are not part of a setup run
-            "planned_not_seen": [s for s in steps if s.isdigit() and s not in planned_seen],
+            # (with no Discord, the Discord steps are not part of the run, so they are not listed as unseen)
+            "planned_not_seen": [s for s in steps if s.isdigit() and s not in planned_seen and s not in without],
             "unplanned": [e["what"] for e in unplanned],
             # the required one-time steps never logged (KIT.md logs 1-6 with --retro at the start): while any is
             # missing, `count` is a floor, never the measured N, and record.md says so in its headline
-            "required_not_seen": [s for s in required_steps(steps) if s not in planned_seen],
+            "required_not_seen": [s for s in required_steps(steps, without) if s not in planned_seen],
             "count": len(planned_seen) + len(unplanned),  # N: each one-time step once, plus every unplanned one
             "actions": len(humans),                         # a step done twice counts twice here
             "log": humans,
@@ -270,6 +319,8 @@ def render_md(s, steps):
     out += [f"- **Started:** {s['started']}" + (f" · **finished:** {s['finished']} · **took:** {s['took']}"
                                                 if s["finished"] else " · not finished"),
             f"- **Outcome:** {s['outcome']}",
+            *([] if s.get("discord", True) else
+              [f"- **Discord:** none ({NO_DISCORD}): its phases were skipped, and its steps were not required"]),
             (f"- **Human steps (N): INCOMPLETE, at least {s['human']['count']}.** Required one-time steps never "
              f"logged: {', '.join(s['human']['required_not_seen'])}, so this count is a floor, not the measured N"
              if s["human"]["required_not_seen"] else
@@ -380,8 +431,12 @@ def cmd_start(rd, repo=REPO, now=None):
     return f"run {run_id} started at {sha[:12]}" + (" (dirty tree)" if dirty else "")
 
 
-def cmd_begin(rd, phase, phases, now=None):
+def cmd_begin(rd, phase, phases, now=None, discord=True):
+    """discord: kit.toml's choice, read by main only for a Discord-only phase (DISCORD_PHASES)."""
     run = need_open_run(rd)
+    if phase in DISCORD_PHASES and not discord:  # no Discord: the phase has no guild to act on; skip records it
+        raise RecordError(f"kit.toml says no Discord (discord.enabled = false), so {phase} does not run: "
+                          f"python3 kit/record.py skip {phase}")
     check_begin(read_events(run), phase, phases)
     append(run, {"kind": "begin", "t": now_iso(now), "phase": phase})
     return f"{phase}. {phases[phase]}: begun"
@@ -470,28 +525,51 @@ def cmd_end(rd, phase, accept="", now=None):
     return e["status"], f"{phase} ended: {e['status']}" + (f" ({why})" if why else "")
 
 
-def unlogged_required(events, steps):
+def unlogged_required(events, steps, without=()):
     logged = {e.get("step") for e in events if e["kind"] == "human"}
-    return [s for s in required_steps(steps) if s not in logged]
+    return [s for s in required_steps(steps, without) if s not in logged]
 
 
-def cmd_finish(rd, phases, steps, repo=REPO, now=None, incomplete=False):
+def cmd_skip(rd, phase, phases, discord, now=None):
+    """A Discord-only phase on a server with no Discord. Refused for any other phase, while kit.toml says Discord,
+    out of order (begin's rule), while a phase is open, and for a phase that already passed or was skipped."""
+    run = need_open_run(rd)
+    events = read_events(run)
+    if phase not in DISCORD_PHASES:
+        raise RecordError(f"{phase} is not a Discord-only phase ({', '.join(DISCORD_PHASES)}); it runs on every "
+                          "server")
+    if discord:
+        raise RecordError(f"kit.toml says Discord (no discord.enabled = false), so {phase} runs: begin it")
+    check_begin(events, phase, phases)
+    _, status = phase_state(events)
+    if status.get(phase) in PASSING + (SKIPPED,):
+        raise RecordError(f"{phase} is already {status[phase]}")
+    append(run, {"kind": "skip", "t": now_iso(now), "phase": phase, "why": NO_DISCORD})
+    return f"{phase}. {phases[phase]}: skipped, {NO_DISCORD}"
+
+
+def cmd_finish(rd, phases, steps, repo=REPO, now=None, incomplete=False, discord=True, without=()):
+    """discord: kit.toml's choice now; without: the steps that choice leaves out (discord_steps, or ())."""
     run = need_run(rd)
     events = read_events(run)
     if any(e["kind"] == "finish" for e in events):
         raise RecordError(f"run {run.name} is already finished")
-    open_phase, _ = phase_state(events)
+    open_phase, status = phase_state(events)
     if open_phase:
         raise RecordError(f"{open_phase} is still open: end it first (python3 kit/record.py end {open_phase})")
-    unlogged = unlogged_required(events, steps)
+    skipped = [p for p, st in status.items() if st == SKIPPED]  # now, not ever: a skipped phase begun later counts
+    if discord and skipped:  # skipped for no Discord, then kit.toml went back to Discord: those phases never ran
+        raise RecordError(f"kit.toml says Discord, but {', '.join(skipped)} were skipped for no Discord: run them "
+                          "(begin), or set discord.enabled = false if this server has no Discord")
+    unlogged = unlogged_required(events, steps, without)
     if unlogged and not incomplete:
         raise RecordError(f"required one-time steps never logged: {', '.join(unlogged)}. Log each one the person did "
                           "(python3 kit/record.py human <id> --note \"logged late\"), then finish; a run that "
                           "really misses one is sealed with: python3 kit/record.py finish --incomplete")
     sha, dirty = git_sha(repo)
-    fin = {"kind": "finish", "t": now_iso(now), "sha": sha, "dirty": dirty}
+    fin = {"kind": "finish", "t": now_iso(now), "sha": sha, "dirty": dirty, **({} if discord else {"discord": False})}
     append(run, fin)
-    s = summarize(events + [fin], phases, steps)
+    s = summarize(events + [fin], phases, steps, without)
     write_atomic(run / "record.json", json.dumps(s, indent=2, sort_keys=True) + "\n")
     write_atomic(run / "record.md", render_md(s, steps))
     missing = s["human"]["required_not_seen"]
@@ -511,16 +589,18 @@ def cmd_began(rd, phase, phases):
     return begun[-1]
 
 
-def cmd_status(rd, phases, steps):
+def cmd_status(rd, phases, steps, discord=True, without=()):
     run = need_run(rd)
     events = read_events(run)
     open_phase, status = phase_state(events)
     lines = [f"run {run.name} at {events[0]['sha'][:12]}"]
+    if not discord:  # a Discord run's status reads as it always did
+        lines.append(f"  discord: none ({NO_DISCORD}): skip {', '.join(DISCORD_PHASES)}")
     for p, title in phases.items():
         mark = "OPEN" if p == open_phase else status.get(p, "-")
         lines.append(f"  {p}. {title}: {mark}")
     lines.append(f"  human steps so far: {sum(1 for e in events if e['kind'] == 'human')}")
-    unlogged = unlogged_required(events, steps)
+    unlogged = unlogged_required(events, steps, without)
     lines.append("  required one-time steps not logged yet: " + (", ".join(unlogged) if unlogged else "none"))
     return "\n".join(lines)
 
@@ -538,6 +618,7 @@ def main(argv=None, version=None):
     sub.add_parser("start")
     sub.add_parser("status")
     sub.add_parser("began").add_argument("phase")
+    sub.add_parser("skip", help="a Discord-only phase, on a server with no Discord").add_argument("phase")
     p = sub.add_parser("finish")
     p.add_argument("--incomplete", action="store_true",
                    help="seal the run although a required one-time step was never logged (N is then a floor)")
@@ -563,11 +644,16 @@ def main(argv=None, version=None):
         if os.geteuid() == 0:
             raise RecordError("run as the kit user, not root (the record lives in the kit user's checkout)")
         phases = load_phases(KIT_MD.read_text())
-        steps = load_steps(STEPS_MD.read_text())
+        steps_text = STEPS_MD.read_text()
+        steps = load_steps(steps_text)
+        # the only commands that read kit.toml (its one key): skip, status, finish, and begin of a Discord-only phase
+        if a.cmd in ("skip", "status", "finish") or (a.cmd == "begin" and a.phase in DISCORD_PHASES):
+            discord = discord_on()
+            without = () if discord else discord_steps(steps_text)
         if a.cmd == "start":
             print(cmd_start(rd, repo=REPO))
         elif a.cmd == "begin":
-            print(cmd_begin(rd, a.phase, phases))
+            print(cmd_begin(rd, a.phase, phases, discord=discord if a.phase in DISCORD_PHASES else True))
         elif a.cmd == "gate":
             cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
             rc, msg = cmd_gate(rd, a.phase, cmd)
@@ -581,10 +667,13 @@ def main(argv=None, version=None):
             status, msg = cmd_end(rd, a.phase, accept=a.accept)
             print(msg)
             return 0 if status in PASSING else 1
+        elif a.cmd == "skip":
+            print(cmd_skip(rd, a.phase, phases, discord))
         elif a.cmd == "finish":
-            print(cmd_finish(rd, phases, steps, repo=REPO, incomplete=a.incomplete))
+            print(cmd_finish(rd, phases, steps, repo=REPO, incomplete=a.incomplete, discord=discord,
+                             without=without))
         elif a.cmd == "status":
-            print(cmd_status(rd, phases, steps))
+            print(cmd_status(rd, phases, steps, discord, without))
         elif a.cmd == "began":
             print(cmd_began(rd, a.phase, phases))
     except (RecordError, OSError) as e:

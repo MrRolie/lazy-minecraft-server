@@ -7,9 +7,12 @@
 # - with an mc-alert when it does not start (rv3: this failure was silent)
 # No compose output goes into the alert or the log, because a malformed .env.bridge error can quote the
 # file. It does not watch health afterwards; `host/check.sh` requires the container healthy.
+# A server with no Discord (kit.toml discord.enabled = false, so kit.env says MC_DISCORD="off") has no bridge: it
+# exits 0 at once, with one log line and no alert. An unreadable kit.env is read as Discord, today's path.
 set -uo pipefail
 
 STAMP=/run/mc-host/bridge-fence.ok
+KIT_ENV=/etc/mc-host/kit.env
 ALERT=/usr/local/sbin/mc-alert
 DOCKER=/usr/bin/docker
 TIMEOUT=60   # < mc-server.service TimeoutStartSec (host/test_host.py pins it)
@@ -20,6 +23,10 @@ fail() {
   exit 1
 }
 
+if grep -qx 'MC_DISCORD="off"' "$KIT_ENV" 2>/dev/null; then
+  echo "mc-bridge-up: no Discord on this server (kit.toml discord.enabled = false): no bridge to start"
+  exit 0
+fi
 [ -f "$STAMP" ] || fail "no egress fence (${STAMP} missing; see mc-bridge-fence.service)"
 /usr/bin/timeout "$TIMEOUT" "$DOCKER" compose up -d --no-build bridge >/dev/null 2>&1
 rc=$?

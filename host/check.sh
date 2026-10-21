@@ -27,11 +27,12 @@ fi
 # Only render's own lines are sourced: KIT_ENV_LINE in kit/render.py (no $, `, \ or quote inside), for only the
 # keys render writes (kit_env_values; host/test_host.py pins this list), so never PATH, IFS or KIT_ENV.
 KIT_KEYS='MC_HOST_NAME|MC_USER|MC_HOME|MC_REPO|MC_UID|MC_GID|MC_TZ|MC_NET_MODE|MC_WIRED_CONN|MC_WIFI_CONN'
-KIT_KEYS+='|MC_WIRED_ADDR|MC_WIRED_GW|MC_WIRED_DNS|MC_MAINT_START|MC_TS_HOST_NAME|MC_SERVER_ADDRESS|MC_CHARGE_CAP'
+KIT_KEYS+='|MC_WIRED_ADDR|MC_WIRED_GW|MC_WIRED_DNS|MC_MAINT_START|MC_TS_HOST_NAME|MC_SERVER_ADDRESS|MC_CHARGE_CAP|MC_DISCORD'
 if grep -qvE '^(#.*|('"$KIT_KEYS"')="[^"\\$`]*")?$' "$KIT_ENV"; then
   echo "FAIL  ${KIT_ENV} has a line that is not KEY=\"value\" (re-render it: python3 kit/render.py)"
   exit 1
 fi
+unset MC_DISCORD  # the one optional key: only kit.env may set it, never the caller's environment
 # shellcheck source=/dev/null
 . "$KIT_ENV"
 for k in MC_HOST_NAME MC_USER MC_HOME MC_NET_MODE MC_CHARGE_CAP; do
@@ -52,6 +53,16 @@ WIFI="$MC_WIFI_CONN"
 WIRED_ADDR="$MC_WIRED_ADDR"
 WIRED_GW="$MC_WIRED_GW"
 WIRED_DNS="$MC_WIRED_DNS"
+# Discord or not (kit.toml discord.enabled): render writes MC_DISCORD="off" for no Discord, and nothing for Discord,
+# so an absent key is Discord, the stricter mode (the webhook and the bridge are then required).
+DISCORD="${MC_DISCORD:-on}"
+case "$DISCORD" in
+  on | off) ;;
+  *)
+    echo "FAIL  ${KIT_ENV} MC_DISCORD=${MC_DISCORD} (off, or absent for Discord; re-render it: python3 kit/render.py)"
+    exit 1
+    ;;
+esac
 # <<< kit config
 UNIT_DIR=/etc/systemd/system
 LINGER_DIR=/var/lib/systemd/linger
@@ -517,7 +528,9 @@ expect "${MC_USER} uid (= itzg and bridge uid)" 1000 "$(id -u "$MC_USER")"
 # Running is not enough: during a FATAL hold (bad token, missing channel, no fence) it runs for 600 s. Healthy
 # means ready on Discord with the pump turning (compose healthcheck on /tmp/ready). Found by label, not compose.
 bridge_id="$(docker ps -aq --filter label=com.docker.compose.project=minecraft-ai-host --filter label=com.docker.compose.service=bridge 2>/dev/null | head -1)"
-if [ -z "$bridge_id" ]; then
+if [ -z "$bridge_id" ] && [ "$DISCORD" = off ]; then
+  res INFO "no bridge container: no Discord on this server (kit.toml discord.enabled = false)"
+elif [ -z "$bridge_id" ]; then
   res WARN "bridge container not created yet (bridge/README.md, Deploy)"
 else
   bridge_health="$(docker inspect --format '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$bridge_id" 2>&1)"
@@ -543,6 +556,8 @@ elif [ -f "$envb" ]; then
       grep -qE "^${k}=[^[:space:]]+\$" "$envb" || res FAIL "${envb} has no non-empty ${k}"
     done
   fi
+elif [ "$DISCORD" = off ]; then
+  res INFO "${envb} absent: no Discord on this server, so no bridge to log in"
 else
   res WARN "${envb} missing: the bridge can't log in (bridge/README.md, Deploy)"
 fi
@@ -561,7 +576,9 @@ fi
 # The fence is keyed on the interface name: the live network must carry it.
 want_if="$(bash "${HOST_DIR}/bin/mc-bridge-fence" print | sed -n 's/^iface //p')"
 have_if="$(docker network inspect minecraft-ai-host_discord --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)"
-if [ -z "$have_if" ]; then
+if [ -z "$have_if" ] && [ "$DISCORD" = off ]; then
+  res INFO "network minecraft-ai-host_discord absent: no Discord on this server, so no bridge to start it"
+elif [ -z "$have_if" ]; then
   res WARN "network minecraft-ai-host_discord not created yet (it is, with the bridge's first up)"
 else
   expect "bridge network interface (the fence's anchor)" "$want_if" "$have_if"
@@ -570,7 +587,10 @@ fi
 # ---- alerts -----------------------------------------------------------------------------------
 section "alerts"
 wh=/etc/mc-host/webhook
-if [ ! -e "$wh" ]; then
+if [ "$DISCORD" = off ]; then
+  # Chosen at the kit's card, not owed (docs/kit/KIT.md "With no Discord"): said plainly, never a PASS.
+  res INFO "alerts are OFF: no Discord on this server (kit.toml discord.enabled = false). The watchdogs still restart and repair; nobody is told when something fails"
+elif [ ! -e "$wh" ]; then
   res FAIL "${wh} missing (alerts only reach the journal); see setup.sh next steps"
 else
   meta="$(stat -c '%U:%G %a' "$wh")"

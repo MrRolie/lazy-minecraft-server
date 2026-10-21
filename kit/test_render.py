@@ -881,3 +881,116 @@ def test_custom_mode_without_its_pack_refuses_by_name(tmp_path, capsys):
     (tmp_path / "pack-custom" / "mods.toml").unlink()
     assert render.main(["--repo", str(tmp_path)]) == 2
     assert "pack-custom/mods.toml is missing" in capsys.readouterr().err
+
+
+# ---- no Discord (discord.enabled = false: HUMAN-STEPS step 23's second question) -----------------------------------
+
+def no_discord(**extra):
+    d = fixture()
+    d["discord"] = {"enabled": False, **extra}
+    return d
+
+
+def no_discord_toml(text):
+    return re.sub(r"(?ms)^\[discord\]\n.*?(?=^\[)", "[discord]\nenabled = false\n\n", text)
+
+
+def test_no_discord_is_the_enabled_key_alone():
+    cfg = config.validate(no_discord())
+    assert config.discord_enabled(cfg) is False
+    assert config.discord_enabled(config.load(EXAMPLE)) is True  # absent: Discord, as every kit.toml before it
+    d = fixture()
+    d["discord"]["enabled"] = True
+    assert config.discord_enabled(config.validate(d)) is True
+
+
+@pytest.mark.parametrize("key", ["guild_id", "bridge_bot_id", "alert_channel", "invite_lockdown", "profile"])
+def test_no_discord_refuses_a_discord_key_that_would_do_nothing(key):
+    refused(no_discord(**{key: fixture()["discord"][key]}), rf"discord\.{key}: set, but discord\.enabled is false")
+
+
+def test_discord_still_requires_every_key_and_enabled_must_be_a_bool():
+    d = fixture()
+    d["discord"]["enabled"] = True
+    del d["discord"]["guild_id"]
+    refused(d, r"discord\.guild_id: missing")
+    d = fixture()
+    d["discord"]["enabled"] = "no"
+    refused(d, r"discord\.enabled: must be bool")
+    refused({**fixture(), "discord": {}}, r"discord\.guild_id: missing")  # an empty section is not "no Discord"
+
+
+def test_render_with_no_discord_writes_no_bridge_env_and_checks_none(repo):
+    (repo / "kit.toml").write_text(no_discord_toml((repo / "kit.toml").read_text()))
+    (repo / ".env").write_text(SECRETS)
+    assert render.main(["--repo", str(repo)]) == 0
+    assert not (repo / ".env.bridge").exists()
+    assert 'MC_DISCORD="off"\n' in (repo / "host" / "kit.env").read_text()
+    assert render.main(["--repo", str(repo), "--check"]) == 0
+    assert render.main(["--repo", str(repo), "--check", "--env-only"]) == 0
+
+
+def test_render_with_discord_still_writes_and_checks_the_bridge_env(repo, capsys):
+    (repo / ".env").write_text(SECRETS)
+    assert render.main(["--repo", str(repo)]) == 0
+    assert (repo / ".env.bridge").read_text() == f"DISCORD_GUILD_ID={fixture()['discord']['guild_id']}\n"
+    assert "MC_DISCORD" not in (repo / "host" / "kit.env").read_text()
+    (repo / ".env.bridge").unlink()
+    assert render.main(["--repo", str(repo), "--check", "--env-only"]) == 1
+    assert "STALE .env.bridge: missing" in capsys.readouterr().out
+
+
+def test_compose_parses_with_no_bridge_env(scratch):
+    """No Discord means no .env.bridge at all: compose (required: false) must still parse, or every P4/P8 gate
+    would fail on a no-Discord kit."""
+    repo_copy(scratch)
+    (scratch / "kit.toml").write_text(no_discord_toml((scratch / "kit.toml").read_text()))
+    (scratch / ".env").write_text(SECRETS)
+    assert render.main(["--repo", str(scratch)]) == 0
+    r = subprocess.run(["docker", "compose", "config", "-q"], cwd=scratch, capture_output=True, text=True)
+    assert r.returncode == 0 and not (scratch / ".env.bridge").exists()
+
+
+def _mutant(tmp_path, name, guard, mutant):
+    import importlib.util
+    src = (KIT / f"{name}.py").read_text()
+    assert src.count(guard) == 1, f"stale or ambiguous mutation pattern {guard!r}"
+    path = tmp_path / f"{name}_mut.py"
+    path.write_text(src.replace(guard, mutant))
+    spec = importlib.util.spec_from_file_location(f"{name}_mut", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_choice_guard_catches_its_mutant(tmp_path):
+    """Without _discord_off, enabled = false alone is refused for the ids it leaves out (the test above passes)."""
+    mod = _mutant(tmp_path, "kitconfig", '    return isinstance(table, dict) and table.get("enabled") is False',
+                  "    return False")
+    with pytest.raises(mod.ConfigError, match=r"discord\.guild_id: missing"):
+        mod.validate(no_discord())
+
+
+def test_the_leftover_key_guard_catches_its_mutant(tmp_path):
+    """Without it, a guild id left under enabled = false is silently taken."""
+    mod = _mutant(tmp_path, "kitconfig", "                if key in table:\n                    errors.append(",
+                  "                if False:\n                    errors.append(")
+    mod.validate(no_discord(guild_id=fixture()["discord"]["guild_id"]))
+
+
+def test_the_bridge_env_guard_catches_its_mutant(repo, tmp_path):
+    """Without the env_updates filter, render cannot render a no-Discord kit at all (no guild id to write)."""
+    mod = _mutant(tmp_path, "render", '    if kitconfig.discord_enabled(cfg):\n        out[".env.bridge"]',
+                  '    if True:\n        out[".env.bridge"]')
+    (repo / "kit.toml").write_text(no_discord_toml((repo / "kit.toml").read_text()))
+    (repo / ".env").write_text(SECRETS)
+    with pytest.raises(KeyError):
+        mod.main(["--repo", str(repo)])
+    assert not (repo / ".env.bridge").exists()
+
+
+def test_the_kit_env_guard_catches_its_mutant(tmp_path):
+    """Without the condition, a Discord kit (asus-node) would get MC_DISCORD in its kit.env: a changed golden."""
+    mod = _mutant(tmp_path, "render", '**({} if kitconfig.discord_enabled(cfg) else {"MC_DISCORD": "off"})',
+                  '**{"MC_DISCORD": "off"}')
+    assert "MC_DISCORD" in mod.kit_env_values(config.load(EXAMPLE))

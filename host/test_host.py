@@ -660,8 +660,10 @@ def test_mc_bridge_up_is_gated_bounded_and_never_builds():
     assert "STAMP=/run/mc-host/bridge-fence.ok" in t.splitlines()
 
 
-def run_bridge_up(tmp_path, stamp=True, docker_rc=0):
-    """mc-bridge-up with its constants pointed at stubs (copied and rewritten: the real one has no knobs)."""
+def run_bridge_up(tmp_path, stamp=True, docker_rc=0, kit_env='MC_CHARGE_CAP="none"\n'):
+    """mc-bridge-up with its constants pointed at stubs (copied and rewritten: the real one has no knobs). kit_env:
+    the text of its kit.env (default: a Discord instance's, which has no MC_DISCORD line)."""
+    (tmp_path / "kit.env").write_text(kit_env)
     log = tmp_path / "calls"
     for name, body in [("docker", f'echo "docker $*" >> {log}; echo "SECRET-TOKEN-TEXT" >&2; exit {docker_rc}'),
                        ("alert", f'echo "alert $*" >> {log}')]:
@@ -671,7 +673,8 @@ def run_bridge_up(tmp_path, stamp=True, docker_rc=0):
     if stamp:
         st.write_text("ok\n")
     script = BRIDGE_UP.read_text()
-    for k, v in {"STAMP": st, "ALERT": tmp_path / "alert", "DOCKER": tmp_path / "docker"}.items():
+    for k, v in {"STAMP": st, "ALERT": tmp_path / "alert", "DOCKER": tmp_path / "docker",
+                 "KIT_ENV": tmp_path / "kit.env"}.items():
         script = re.sub(rf"^{k}=.*$", f"{k}={v}", script, count=1, flags=re.M)
     (tmp_path / "up").write_text(script)
     r = subprocess.run(["bash", str(tmp_path / "up")], capture_output=True, text=True)
@@ -1296,9 +1299,9 @@ def run_step10(repo):
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout
 
 
-def run_mailbox_check(repo, path=None):
+def run_mailbox_check(repo, path=None, discord="on"):
     user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
-    script = (f'MC_USER={user}\nREPO={repo}\nHOST_DIR={HOST}\n'
+    script = (f'MC_USER={user}\nREPO={repo}\nHOST_DIR={HOST}\nDISCORD={discord}\n'
               'res() { printf "%s\\t%s\\n" "$1" "${*:2}"; }\n'
               'expect() { if [ "$3" = "$2" ]; then res PASS "$1 = $3"; else res FAIL "$1 = $3 (want $2)"; fi; }\n'
               'section() { :; }\n' + MAILBOX)
@@ -2669,9 +2672,13 @@ def test_the_shell_kit_env_shape_check_matches_render(script, tmp_path, _kit_env
 
 @pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
 def test_the_shell_kit_key_allowlist_is_the_keys_render_writes(script):
-    """KIT_KEYS (setup.sh and check.sh) is a second statement of kit_env_values()'s keys: this test is its alarm."""
+    """KIT_KEYS (setup.sh and check.sh) is a second statement of the keys kit_env_values() can write (render's
+    KIT_ENV_KEYS, which holds MC_DISCORD, written only with no Discord): this test is its alarm."""
     parts = re.findall(r"^KIT_KEYS\+?='([^']*)'$", kit_block(HOST / script), re.M)
-    assert len(parts) == 2 and "".join(parts).split("|") == list(KIT)
+    assert len(parts) == 2 and "".join(parts).split("|") == list(kitrender.KIT_ENV_KEYS)
+    off = kitconfig.validate({**kitconfig.load(EXAMPLE), "discord": {"enabled": False}})
+    for values in (KIT, kitrender.kit_env_values(off)):  # every key render writes is listed, in render's order
+        assert [k for k in kitrender.KIT_ENV_KEYS if k in values] == list(values)
 
 
 @pytest.mark.parametrize("script,calls", [("setup.sh", 1), ("check.sh", 2)])
@@ -3365,9 +3372,10 @@ STEP7 = section(HOST / "setup.sh", "# ---- 7. alerts", "# ---- 8. ssh")
 HOOK = "https://discord.com/api/webhooks/1500000000000000006/FakeHookToken_0123-abc"
 
 
-def run_step7(tmp_path):
+def run_step7(tmp_path, discord="on"):
     """Step 7 verbatim, with /etc/mc-host in tmp_path and root ownership mapped to whoever runs the test. runuser is a
-    recording stub that runs the command as this same user (the test cannot switch users)."""
+    recording stub that runs the command as this same user (the test cannot switch users). discord: the kit block's
+    DISCORD (on, or off for kit.toml discord.enabled = false)."""
     user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
     etc = tmp_path / "etc"
     etc.mkdir(exist_ok=True)
@@ -3377,10 +3385,11 @@ def run_step7(tmp_path):
     path = stub_bin(tmp_path, runuser=f'echo "$*" >> {tmp_path}/runuser.log; [ "$1" = -u ] && shift 2; '
                                       '[ "$1" = -- ] && shift; exec "$@"')
     script = (f'set -euo pipefail\nMC_USER={user}\nMC_HOME={tmp_path}/home\nMC_HOST_NAME=box\nNEXT=()\nABORTED=0\n'
+              f'DISCORD={discord}\n'
               'step() { printf "== %s\\n" "$*"; }\nlog() { printf "   %s\\n" "$*"; }\n'
               'warn() { printf "   WARNING: %s\\n" "$*"; }\nnext() { NEXT+=("$*"); }\n'
               'abort_step() { warn "ABORTED: $*"; next "$*"; ABORTED=1; }\netc_mc_host_dir() { :; }\n'
-              + body + '\necho "ABORTED=$ABORTED"\n')
+              + body + '\necho "ABORTED=$ABORTED NEXT=${#NEXT[@]}"\n')
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={**os.environ, "PATH": path})
     assert r.returncode == 0, r.stderr
     return r.stdout, etc / "webhook"
@@ -3462,3 +3471,131 @@ def test_step7_stages_where_bootstrap_writes():
     assert f'WEBHOOK_STAGED="${{MC_HOME}}/{bootstrap.STAGED_REL.as_posix()}"' in STEP7
     regex = re.search(r"WEBHOOK_URL_RE='\^([^']+)\$'", STEP7).group(1)
     assert regex == bootstrap.WEBHOOK_URL.pattern
+
+
+# ---- no Discord (kit.toml discord.enabled = false, KIT.md "With no Discord") ---------------------------------------
+# render writes MC_DISCORD="off" into kit.env for no Discord and nothing for Discord. Every reader takes an absent
+# key as Discord, the stricter mode, so a Discord instance (asus-node) runs exactly the code it ran before.
+
+OFF_LINE = 'MC_DISCORD="off"\n'
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+@pytest.mark.parametrize("extra,want", [("", "on"), (OFF_LINE, "off")])
+def test_the_kit_block_reads_discord_from_kit_env_only(tmp_path, _kit_env, monkeypatch, script, extra, want):
+    """No key: Discord. MC_DISCORD="off": no Discord. A caller's environment never flips it (setup.sh runs as root,
+    and an exported MC_DISCORD=off would silence check.sh's webhook FAIL on a Discord server)."""
+    (tmp_path / "kit.env").write_text(_kit_env.read_text() + extra)
+    monkeypatch.setenv("MC_DISCORD", "off" if want == "on" else "on")
+    r = run_kit_block(HOST / script, tmp_path, ["DISCORD"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == f"DISCORD={want}\n"
+
+
+@pytest.mark.parametrize("script", ["setup.sh", "check.sh"])
+def test_the_kit_block_refuses_an_mc_discord_render_would_not_mean(tmp_path, _kit_env, script):
+    (tmp_path / "kit.env").write_text(_kit_env.read_text() + 'MC_DISCORD="no"\n')
+    r = run_kit_block(HOST / script, tmp_path, ["DISCORD"])
+    assert r.returncode == 1 and "MC_DISCORD=no" in r.stdout + r.stderr
+
+
+def test_render_writes_mc_discord_only_for_no_discord():
+    on = kitrender.kit_env_values(kitconfig.load(EXAMPLE))
+    off = kitrender.kit_env_values(kitconfig.validate({**kitconfig.load(EXAMPLE), "discord": {"enabled": False}}))
+    assert "MC_DISCORD" not in on and off == {**on, "MC_DISCORD": "off"}
+    assert OFF_LINE in kitrender.kit_env_text(off)
+
+
+def test_step7_with_no_discord_is_quiet_and_owes_nothing(tmp_path):
+    out, installed = run_step7(tmp_path, discord="off")
+    assert "off: no Discord on this server" in out and "WARNING" not in out
+    assert "ABORTED=0 NEXT=0" in out and not installed.exists()
+    out, _ = run_step7(tmp_path)  # the same host with Discord: the missing webhook is owed again
+    assert "webhook missing: alerts are logged to the journal only" in out and "NEXT=1" in out
+
+
+ALERTS = section(HOST / "check.sh", "# ---- alerts", "# ---- info")
+
+
+def run_alerts_check(tmp_path, discord, webhook=None):
+    wh = tmp_path / "webhook"
+    if webhook is not None:
+        wh.write_text(webhook)
+        wh.chmod(0o640)
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    script = (f'MC_USER={user}\nDISCORD={discord}\n'
+              'res() { printf "%s\\t%s\\n" "$1" "${*:2}"; }\n'
+              'expect() { res EXPECT "$*"; }\n'
+              'section() { :; }\n' + ALERTS.replace("wh=/etc/mc-host/webhook", f"wh={wh}"))
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+    return [tuple(ln.split("\t", 1)) for ln in out.splitlines() if "\t" in ln]
+
+
+def test_check_alerts_with_no_discord_is_info_and_says_nobody_is_told(tmp_path):
+    results = run_alerts_check(tmp_path, "off")
+    assert [st for st, _ in results] == ["INFO"]
+    assert "alerts are OFF" in results[0][1] and "nobody is told when something fails" in results[0][1]
+
+
+def test_check_alerts_with_discord_still_fails_without_a_webhook(tmp_path):
+    assert [st for st, _ in run_alerts_check(tmp_path, "on")] == ["FAIL"]
+    assert "PASS" in [st for st, _ in run_alerts_check(tmp_path, "on", "https://discord.com/api/webhooks/1/x\n")]
+
+
+@pytest.mark.parametrize("discord,want", [("off", "INFO"), ("on", "WARN")])
+def test_check_bridge_container_and_token_file_follow_the_choice(tmp_path, discord, want):
+    """No bridge container and no .env.bridge: chosen with no Discord (INFO), owed with Discord (WARN, as before)."""
+    run_step10(tmp_path)
+    path = stub_bin(tmp_path, docker="exit 0")  # docker ps -aq: no bridge container
+    results = run_mailbox_check(tmp_path, path, discord)
+    bridge = [st for st, msg in results if "bridge container" in msg or ".env.bridge" in msg]
+    assert bridge == [want, want], results
+
+
+FENCE_NET = section(HOST / "check.sh", 'want_if="$(', "# ---- alerts")
+
+
+@pytest.mark.parametrize("discord,want", [("off", "INFO"), ("on", "WARN")])
+def test_check_bridge_network_absent_follows_the_choice(tmp_path, discord, want):
+    path = stub_bin(tmp_path, docker="exit 0")  # docker network inspect: no network
+    script = (f'HOST_DIR={HOST}\nDISCORD={discord}\nres() {{ printf "%s\\t%s\\n" "$1" "${{*:2}}"; }}\n'
+              'expect() { res EXPECT "$*"; }\n' + FENCE_NET)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                         env={**os.environ, "PATH": path}).stdout
+    assert [ln.split("\t")[0] for ln in out.splitlines()] == [want]
+
+
+def test_mc_bridge_up_with_no_discord_exits_zero_quietly_without_docker(tmp_path):
+    r, calls = run_bridge_up(tmp_path, stamp=False, kit_env='MC_CHARGE_CAP="none"\n' + OFF_LINE)
+    assert r.returncode == 0 and calls == ""  # no docker call, and no "bridge NOT started" alert
+    assert "no Discord on this server" in r.stdout
+
+
+def test_mc_bridge_up_without_the_off_line_is_todays_path(tmp_path):
+    """A Discord instance's kit.env (no MC_DISCORD), or a value render never writes, still alerts on a missing
+    fence."""
+    r, calls = run_bridge_up(tmp_path, stamp=False)
+    assert r.returncode == 1 and calls.startswith("alert Discord bridge NOT started")
+    r2, _ = run_bridge_up(tmp_path, stamp=False, kit_env='MC_DISCORD="offline"\n')
+    assert r2.returncode == 1
+
+
+def test_mc_alert_with_no_discord_logs_and_posts_nothing(tmp_path, monkeypatch, capsys):
+    (tmp_path / "kit.env").write_text('MC_CHARGE_CAP="none"\n' + OFF_LINE)
+    monkeypatch.setenv("MC_KIT_ENV", str(tmp_path / "kit.env"))
+    monkeypatch.setattr(al.subprocess, "run", lambda *a, **k: None)  # no logger calls
+    monkeypatch.setattr(al, "read_webhook", lambda path=None: pytest.fail("read the webhook with no Discord"))
+    monkeypatch.setattr(al, "post", lambda *a: pytest.fail("posted with no Discord"))
+    assert al.main(["kit: the alert path works"]) == 0
+    err = capsys.readouterr().err
+    assert "alert: [" in err and "alerts are off" in err  # the alert itself still reaches the journal
+
+
+def test_mc_alert_with_discord_still_posts(monkeypatch, capsys):
+    """The fixture kit.env (autouse _kit_env: a Discord instance's) has no MC_DISCORD: the webhook path, as before."""
+    posted = []
+    monkeypatch.setattr(al.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(al, "read_webhook", lambda path=None: "https://discord.com/api/webhooks/1/x")
+    monkeypatch.setattr(al, "post", lambda url, content: posted.append(content) or 204)
+    assert al.main(["hello"]) == 0 and len(posted) == 1
+    assert "posted (HTTP 204)" in capsys.readouterr().err

@@ -21,7 +21,8 @@
 #   5. update window      unattended-upgrades also takes Tailscale (Docker blacklisted: manual upgrades only);
 #                         tailscale/snap auto-update moved into the window
 #   6. backups            system mc-backup units (timer left DISABLED until stand-up); user-unit copies removed
-#   7. alerts             /etc/mc-host/ for the Discord webhook; installs one a kit staged (discord/bootstrap.py)
+#   7. alerts             /etc/mc-host/ for the Discord webhook; installs one a kit staged (discord/bootstrap.py).
+#                         With no Discord (kit.toml discord.enabled = false) alerts stay off, on purpose
 #   8. ssh                key-only (refused if the kit user has no authorized key)
 #   9. timers             mc-netwatch.timer, mc-maint.timer and mc-heal.timer enabled now (mc-server + mc-backup
 #                         wait for stand-up)
@@ -46,11 +47,12 @@ fi
 # Sourced as root, so only render's own lines: KIT_ENV_LINE in kit/render.py (no $, `, \ or quote inside), for
 # only the keys render writes (kit_env_values; host/test_host.py pins this list), so never PATH, IFS or KIT_ENV.
 KIT_KEYS='MC_HOST_NAME|MC_USER|MC_HOME|MC_REPO|MC_UID|MC_GID|MC_TZ|MC_NET_MODE|MC_WIRED_CONN|MC_WIFI_CONN'
-KIT_KEYS+='|MC_WIRED_ADDR|MC_WIRED_GW|MC_WIRED_DNS|MC_MAINT_START|MC_TS_HOST_NAME|MC_SERVER_ADDRESS|MC_CHARGE_CAP'
+KIT_KEYS+='|MC_WIRED_ADDR|MC_WIRED_GW|MC_WIRED_DNS|MC_MAINT_START|MC_TS_HOST_NAME|MC_SERVER_ADDRESS|MC_CHARGE_CAP|MC_DISCORD'
 if grep -nvE '^(#.*|('"$KIT_KEYS"')="[^"\\$`]*")?$' "$KIT_ENV" >&2; then
   echo "refusing: the line(s) above in ${KIT_ENV} are not KEY=\"value\"; re-render it: python3 kit/render.py" >&2
   exit 1
 fi
+unset MC_DISCORD  # the one optional key: only kit.env may set it, never the caller's environment
 # shellcheck source=/dev/null
 . "$KIT_ENV"
 for k in MC_HOST_NAME MC_USER MC_HOME MC_REPO MC_NET_MODE MC_CHARGE_CAP; do
@@ -93,6 +95,16 @@ WIRED_ADDR="$MC_WIRED_ADDR"
 WIRED_GW="$MC_WIRED_GW"
 WIRED_DNS="$MC_WIRED_DNS"
 WIFI="$MC_WIFI_CONN"
+# Discord or not (kit.toml discord.enabled): render writes MC_DISCORD="off" for no Discord, and nothing for Discord,
+# so an absent key is Discord, the stricter mode.
+DISCORD="${MC_DISCORD:-on}"
+case "$DISCORD" in
+  on | off) ;;
+  *)
+    echo "refusing: ${KIT_ENV} MC_DISCORD=${MC_DISCORD} (off, or absent for Discord)" >&2
+    exit 1
+    ;;
+esac
 # <<< kit config
 STAND_UP=0
 case "${1:-}" in
@@ -547,6 +559,9 @@ if [ -f /etc/mc-host/webhook ]; then
     chmod 640 /etc/mc-host/webhook
     log "fixed /etc/mc-host/webhook ownership/mode (root:${MC_USER} 640)"
   fi
+elif [ "$DISCORD" = off ]; then
+  # Chosen, not owed: no warning and no next step (KIT.md "With no Discord").
+  log "off: no Discord on this server (kit.toml discord.enabled = false), so no webhook; alerts reach the journal only"
 else
   warn "/etc/mc-host/webhook missing: alerts are logged to the journal only"
   next "Alerts: on a kit, as ${MC_USER}: python3 discord/bootstrap.py webhook --apply, then re-run setup. Or by hand:

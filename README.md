@@ -3,7 +3,7 @@
 Laziness here is engineered.
 
 A modded Minecraft server for you and your friends, on an old laptop you already own. Claude Code does the setup:
-your Discord server's channels, the private network, the Minecraft server itself, backups and self-repair. You do the handful
+your Discord server's channels (Discord is optional), the private network, the Minecraft server itself, backups and self-repair. You do the handful
 of steps only a person can do, and then you play.
 
 ## Start here
@@ -31,24 +31,27 @@ Part-time players who want a server for their group without spending their free 
 
 ## What you do, what Claude does
 
-**You, once:** about 20 steps, or 19 if you already have a Discord account. Most of them are accounts (a Claude
-plan, Discord, Tailscale), installing Ubuntu, logging Claude in, creating the two Discord bots and clicking their
-invites, signing in to Tailscale, and choosing the game. A Wi-Fi password or a fixed address adds a step, only if
-your setup needs one.
+**You, once:** about 20 steps (19 if you already have Discord, 12 with no Discord). Most of them are accounts (a
+Claude plan, Tailscale, and Discord if you want it), installing Ubuntu, logging Claude in, signing in to Tailscale,
+and choosing the game; with Discord, also creating the two Discord bots and clicking their invites. A Wi-Fi password
+or a fixed address adds a step, only if your setup needs one.
 
-**Each friend, once:** 10 steps: own Minecraft Java Edition, join your Discord, install Tailscale and accept the
-share, install a launcher, import the pack, whitelist themselves.
+**Each friend, once:** 10 steps (9 with no Discord): own Minecraft Java Edition, join your Discord (only with
+Discord), install Tailscale and accept the share, install a launcher, import the pack, whitelist themselves (with no
+Discord, they send you their Minecraft name and Claude adds them).
 
-**You, now and then:** 2 steps: a fresh share link for a late friend, and logging Claude Code back in when asked.
+**You, now and then:** 2 steps (3 with no Discord): a fresh share link for a late friend, and logging Claude Code
+back in when asked; with no Discord, also adding each new friend to the server by their Minecraft name.
 
 Every step, and where to click: [docs/kit/HUMAN-STEPS.md](docs/kit/HUMAN-STEPS.md). The first six are under
 "Start here" above.
 
 **Claude does the rest,** and tells you when it needs you. It checks the laptop and stops with a plain reason if
-the kit can't run there. It installs Docker and Tailscale and sets up friend access. It builds your Discord
-server's channels, the chat bridge between the game and Discord, and an alerts channel. It builds the pack, sets
-the laptop up to run unattended, starts Minecraft and pre-generates the world. Then it restarts the laptop once to
-prove everything comes back by itself.
+the kit can't run there. It installs Docker and Tailscale and sets up friend access. With Discord, it builds your
+Discord server's channels, the chat bridge between the game and Discord, and an alerts channel. With no Discord, it
+writes the message you send your friends, and alerts are off: the server still repairs itself, but nobody is told
+when something fails. It builds the pack, sets the laptop up to run unattended, starts Minecraft and pre-generates
+the world. Then it restarts the laptop once to prove everything comes back by itself.
 
 Claude never creates accounts or types passwords. Bot tokens go through a hidden prompt you run in a second terminal
 window, into files only your account can read.
@@ -74,7 +77,7 @@ found one defect (`#welcome` showed Vanilla Extended's text), fixed in this snap
 - **A USB stick of 12 GB or more**, and another computer to make it on. The account you make on the laptop must be
   its first.
 - **A Claude plan that includes Claude Code** (Pro or Max).
-- **A Discord account** and **a Tailscale account.**
+- **A Tailscale account**, and **a Discord account, only if you want Discord.**
 - **Friends** with Minecraft Java Edition, and Prism Launcher or the Modrinth App.
 - The laptop stays plugged in and switched on; closing the lid is fine.
 
@@ -105,6 +108,8 @@ the docs), except one open finding (below), and no run has gone through those fi
 - The custom-pack path: a friend ran it on 2026-10-20 and reported it went smoothly; its run record is pending. The
   defect it found, `#welcome` showing Vanilla Extended's text, is fixed in this snapshot; no run has gone through
   that fix yet.
+- The no-Discord path has not been run yet, on a laptop or on the virtual machine; its step count is counted from
+  the step list, not timed.
 - Game-to-Discord chat was not checked by eye in the run (Discord-to-game was).
 - One open finding: the Nether and End borders reverted once after a cancel and a restart. A gate caught it; it
   has not been reproduced.
@@ -129,7 +134,8 @@ the docs), except one open finding (below), and no run has gone through those fi
   3 failed checks spanning at least 6 minutes, then alerts.
 - **Out of memory.** The server exits and Docker restarts it (`-XX:+ExitOnOutOfMemoryError`, `docker-compose.yml`).
 - **Nightly backups.** `deploy/backup.sh` at 04:00 (`host/systemd/mc-backup.timer.in`): flushes the world, checks
-  the archive, keeps 7 days. A failed run posts a Discord alert (`host/bin/mc-alert`).
+  the archive, keeps 7 days. A failed run posts a Discord alert (`host/bin/mc-alert`); with no Discord, alerts
+  are off.
 - **Reboots only when nobody is online.** `host/bin/mc-maint` at 05:40 reboots only if one is needed and nobody is
   playing; otherwise it waits and alerts.
 - **Update window.** Ubuntu and Tailscale update unattended at 05:00; Docker never does (`host/conf/apt-52mc-host`).
@@ -157,7 +163,7 @@ the docs), except one open finding (below), and no run has gone through those fi
 uv run --with pytest --with discord.py==2.7.1 pytest
 ```
 
-On this snapshot (2026-10-20): 1711 pass and 54 skip. Every skip says why: it needs the original server's
+On this snapshot (2026-10-20): 1825 pass and 54 skip. Every skip says why: it needs the original server's
 private record, which is not in this copy. On a machine without Python 3.10, two more tests skip, also with their
 reason. Some tests read git history, so run them in a clone, not a bare download.
 
@@ -171,7 +177,7 @@ or a "codex review" mean those AI passes.
 
 ## This snapshot
 
-A public snapshot of a private repository, taken 2026-10-20 from commit `7906a0d`. Dropped, exactly as
+A public snapshot of a private repository, taken 2026-10-20 from commit `7f3806f`. Dropped, exactly as
 `kit/INSTANCE-PATHS` lists: the original server's instance record, its friends' Discord text and posts, and Mikael's
 working notes. A few lines elsewhere were edited where they pointed at those files or at private context, and this
 README and the LICENSE are new. The history stays private.

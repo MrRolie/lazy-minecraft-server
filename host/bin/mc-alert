@@ -8,6 +8,9 @@
 The webhook URL is read from /etc/mc-host/webhook (root:<kit user> 0640). It is a secret: it never
 lands in the repo and is never logged. Alerts are best-effort: a missing file, a bad URL or a
 network error is logged and the exit code is still 0, so an alert can never break its caller.
+On a server with no Discord (kit.toml discord.enabled = false: MC_DISCORD="off" in /etc/mc-host/kit.env)
+alerts are off on purpose: the alert's first line goes to the journal with "alerts are off", nothing
+is posted and no webhook is read, and the exit code is 0.
 python3 stdlib only (curl is not in the Ubuntu 24.04 desktop manifest).
 """
 import argparse
@@ -70,6 +73,16 @@ def format_unit_failure(unit, host, journal, limit=LIMIT):
     return head + fence_open + "\n".join(kept) + fence_close
 
 
+def discord_off(path=None):
+    """True only when kit.env says MC_DISCORD="off" (kit/render.py writes that line for no Discord, and nothing for
+    Discord). An unreadable kit.env reads as Discord: the webhook is then tried, as before the choice existed."""
+    try:
+        with open(path or os.environ.get("MC_KIT_ENV", "/etc/mc-host/kit.env"), encoding="utf-8") as fh:
+            return 'MC_DISCORD="off"' in fh.read().splitlines()
+    except OSError:
+        return False
+
+
 def read_webhook(path=WEBHOOK_FILE):
     """The webhook URL, or None (logged) if the file is missing, unreadable or not a Discord webhook."""
     try:
@@ -119,6 +132,9 @@ def main(argv=None):
         else:
             content = trim(f"[{host}] {args.message}")
         log(f"alert: {content.splitlines()[0]}")
+        if discord_off():
+            log("alerts are off (no Discord on this server: kit.toml discord.enabled = false); not sent")
+            return 0
         url = read_webhook()
         if url is None:
             return 0

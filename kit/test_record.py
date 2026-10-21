@@ -80,7 +80,7 @@ def test_kit_md_has_phases_p0_to_p12_in_order():
 
 def test_human_steps_md_has_the_planned_ids():
     steps = record.load_steps(record.STEPS_MD.read_text())
-    assert set(steps) == {str(n) for n in range(1, 24)} | {f"F{n}" for n in range(1, 11)} | {"R1", "R2"}
+    assert set(steps) == {str(n) for n in range(1, 24)} | {f"F{n}" for n in range(1, 11)} | {"R1", "R2", "R3"}
 
 
 def test_finish_refuses_a_real_run_that_never_logged_the_pack_choice(rd, repo):
@@ -467,8 +467,9 @@ GUARDS = {
                      '(python3 kit/record.py end {open_phase})")\n    for p in phases:',
                      'if False:\n        raise RecordError(f"{open_phase} is still open: end it first '
                      '(python3 kit/record.py end {open_phase})")\n    for p in phases:', _two_begins),
-    "skip_ahead": (_skip_ahead, "if status.get(p) not in PASSING:", "if False:", _wrote_any({"begin"})),
-    "after_a_failure": (_after_a_failure, "if status.get(p) not in PASSING:", "if status.get(p) is None:",
+    "skip_ahead": (_skip_ahead, "if status.get(p) not in PASSING + (SKIPPED,):", "if False:", _wrote_any({"begin"})),
+    "after_a_failure": (_after_a_failure, "if status.get(p) not in PASSING + (SKIPPED,):",
+                        "if status.get(p) is None:",
                         lambda m, rd: any(e["kind"] == "begin" and e["phase"] == "P1"
                                           for e in m.read_events(m.current(rd)))),
     "unknown_phase": (_unknown_phase, "if phase not in phases:", "if False:",
@@ -492,9 +493,9 @@ GUARDS = {
     "start_twice": (_start_twice, 'if run and not any(e["kind"] == "finish" for e in read_events(run)):', "if False:",
                     _second_run),
     "finish_open": (_finish_open, 'if open_phase:\n        raise RecordError(f"{open_phase} is still open: end it first '
-                    '(python3 kit/record.py end {open_phase})")\n    unlogged = ',
+                    '(python3 kit/record.py end {open_phase})")\n    skipped = ',
                     'if False:\n        raise RecordError(f"{open_phase} is still open: end it first '
-                    '(python3 kit/record.py end {open_phase})")\n    unlogged = ', _finished),
+                    '(python3 kit/record.py end {open_phase})")\n    skipped = ', _finished),
     "finish_twice": (_finish_twice, 'if any(e["kind"] == "finish" for e in events):\n        raise',
                      'if False:\n        raise', _two_finishes),
     "human_after_finish": (_after_finish("human"), 'if any(e["kind"] == "finish" for e in read_events(run)):',
@@ -739,7 +740,7 @@ def test_a_friend_or_recurring_step_is_logged_but_never_counted_in_n(rd, repo):
 
 N_MUTANTS = {
     "headline": ('if s["human"]["required_not_seen"] else', 'if False else'),
-    "required_filter": ('not title.startswith("(")]', 'True]'),
+    "required_filter": ('not title.startswith("(") and s not in without]', 's not in without]'),
     "finish_flag": ('if missing else ""', 'if False else ""'),
     "finish_refusal": ("if unlogged and not incomplete:", "if False:"),
     "count_one_time_only": ("planned_seen = [s for s in seen if s.isdigit()]", "planned_seen = list(seen)"),
@@ -830,3 +831,251 @@ def test_began_cli_prints_only_the_time(tmp_path, repo):
     assert cli("begin", "P0").returncode == 0
     r = cli("began", "P0")
     assert r.returncode == 0 and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n", r.stdout), r.stdout
+
+
+# ---- no Discord (kit.toml discord.enabled = false): the Discord phases are skipped, its steps not required -----------
+
+REAL_PHASES = record.load_phases(record.KIT_MD.read_text())
+REAL_STEPS_TEXT = record.STEPS_MD.read_text()
+REAL_STEPS = record.load_steps(REAL_STEPS_TEXT)
+WITHOUT = record.discord_steps(REAL_STEPS_TEXT)
+
+
+def _through(mod, rd, upto, discord=False, minute=1):
+    """Every phase before `upto` in order: a passing gate each, and a skip for each Discord phase (no Discord)."""
+    for p in REAL_PHASES:
+        if p == upto:
+            return
+        if p in mod.DISCORD_PHASES and not discord:
+            mod.cmd_skip(rd, p, REAL_PHASES, discord, now=at(minute))
+        else:
+            mod.cmd_begin(rd, p, REAL_PHASES, now=at(minute))
+            mod.cmd_gate(rd, p, ["true"], now=at(minute), runner=ok(0))
+            mod.cmd_end(rd, p, now=at(minute))
+        minute += 1
+
+
+def test_the_discord_steps_are_the_discord_section_of_human_steps():
+    assert WITHOUT == tuple(str(n) for n in range(9, 17))
+    assert len(record.required_steps(REAL_STEPS)) == 19 and len(record.required_steps(REAL_STEPS, WITHOUT)) == 12
+
+
+def test_the_discord_section_is_required_to_exist():
+    with pytest.raises(record.RecordError, match="You, once: Discord"):
+        record.discord_steps(REAL_STEPS_TEXT.replace("## You, once: Discord", "## You, once: chat"))
+
+
+def test_the_discord_phases_are_p1_p6_p11_and_kit_md_skips_exactly_those():
+    """DISCORD_PHASES is the second statement of which KIT.md phases are Discord's alone: KIT.md gives
+    `record.py skip Pn` in exactly those phases' sections, so a phase added to one and not the other fails here."""
+    assert record.DISCORD_PHASES == ("P1", "P6", "P11")
+    text = record.KIT_MD.read_text()
+    heads = [m.start() for m in record.PHASE_HEAD.finditer(text)] + [len(text)]
+    skipped_in = {}
+    for (p, _), a, b in zip(record.PHASE_HEAD.findall(text), heads, heads[1:]):
+        skipped_in[p] = re.findall(r"python3 kit/record\.py skip (P\d+)\b", text[a:b])
+    assert {p: s for p, s in skipped_in.items() if s} == {p: [p] for p in record.DISCORD_PHASES}
+
+
+def test_a_run_with_no_discord_skips_its_phases_and_says_so(rd, repo):
+    run = started(record, rd, repo)
+    for s in record.required_steps(REAL_STEPS, WITHOUT):
+        record.cmd_human(rd, s, REAL_STEPS, retro=True)
+    _through(record, rd, None)
+    record.cmd_finish(rd, REAL_PHASES, REAL_STEPS, repo=repo, now=at(90), discord=False, without=WITHOUT)
+    s = json.loads((run / "record.json").read_text())
+    assert s["outcome"] == "complete; skipped, no Discord (kit.toml discord.enabled = false): P1, P6, P11"
+    assert s["discord"] is False and s["human"]["required_not_seen"] == []
+    assert not set(WITHOUT) & set(s["human"]["planned_not_seen"])  # not part of the run, so not "unseen"
+    rows = {r["phase"]: r for r in s["phases"]}
+    assert [p for p, r in rows.items() if r["status"] == "skipped"] == ["P1", "P6", "P11"]
+    md = (run / "record.md").read_text()
+    assert "- **Discord:** none" in md and "| skipped (no Discord" in md
+    assert "**Outcome:** complete\n" not in md
+
+
+def test_status_names_the_choice_and_its_required_steps(rd, repo):
+    started(record, rd, repo)
+    with_discord = record.cmd_status(rd, REAL_PHASES, REAL_STEPS)
+    assert "discord:" not in with_discord and "10, 11" in with_discord  # a Discord run's status reads as before
+    without = record.cmd_status(rd, REAL_PHASES, REAL_STEPS, False, WITHOUT)
+    assert "discord: none" in without and "10" not in without.split("not logged yet:")[1]
+
+
+def _skip_with_discord(mod, rd, repo, tmp):
+    started(mod, rd, repo)
+    _through(mod, rd, "P1", discord=True)
+    mod.cmd_skip(rd, "P1", REAL_PHASES, True, now=at(30))
+
+
+def _skip_a_phase_every_server_runs(mod, rd, repo, tmp):
+    started(mod, rd, repo)
+    _through(mod, rd, "P2")
+    mod.cmd_skip(rd, "P2", REAL_PHASES, False, now=at(30))
+
+
+def _skip_out_of_order(mod, rd, repo, tmp):
+    started(mod, rd, repo)
+    _through(mod, rd, "P1")  # P1 and later not run: P6 cannot be skipped yet
+    mod.cmd_skip(rd, "P6", REAL_PHASES, False, now=at(30))
+
+
+def _skip_twice(mod, rd, repo, tmp):
+    started(mod, rd, repo)
+    _through(mod, rd, "P2")  # P1 already skipped
+    mod.cmd_skip(rd, "P1", REAL_PHASES, False, now=at(30))
+
+
+def _finish_discord_after_skips(mod, rd, repo, tmp):
+    started(mod, rd, repo)
+    for s in record.required_steps(REAL_STEPS):
+        mod.cmd_human(rd, s, REAL_STEPS, retro=True)
+    _through(mod, rd, None)  # skipped as no Discord ...
+    mod.cmd_finish(rd, REAL_PHASES, REAL_STEPS, repo=repo, now=at(90), discord=True)  # ... and finished as Discord
+
+
+def _begin_a_discord_phase_with_no_discord(mod, rd, repo, tmp):
+    started(mod, rd, repo)
+    _through(mod, rd, "P1")
+    mod.cmd_begin(rd, "P1", REAL_PHASES, now=at(30), discord=False)
+
+
+def _skips(mod, rd):
+    return sum(e["kind"] == "skip" for e in mod.read_events(mod.current(rd)))
+
+
+SKIP_GUARDS = {
+    "skip_with_discord": (_skip_with_discord, "    if discord:\n        raise RecordError(f\"kit.toml says Discord",
+                          "    if False:\n        raise RecordError(f\"kit.toml says Discord",
+                          lambda m, rd: _skips(m, rd) == 1),
+    "skip_any_phase": (_skip_a_phase_every_server_runs, "if phase not in DISCORD_PHASES:", "if False:",
+                       lambda m, rd: any(e.get("phase") == "P2" and e["kind"] == "skip"
+                                         for e in m.read_events(m.current(rd)))),
+    "skip_out_of_order": (_skip_out_of_order, "    check_begin(events, phase, phases)\n    _, status",
+                          "    _, status", lambda m, rd: any(e.get("phase") == "P6" for e in m.read_events(m.current(rd)))),
+    "skip_twice": (_skip_twice, "if status.get(phase) in PASSING + (SKIPPED,):", "if False:",
+                   lambda m, rd: sum(e.get("phase") == "P1" for e in m.read_events(m.current(rd))) == 2),
+    "finish_discord_after_skips": (_finish_discord_after_skips, "if discord and skipped:", "if False:", _finished),
+    "begin_discord_phase_with_no_discord": (
+        _begin_a_discord_phase_with_no_discord, "    if phase in DISCORD_PHASES and not discord:", "    if False:",
+        lambda m, rd: any(e["kind"] == "begin" and e["phase"] == "P1" for e in m.read_events(m.current(rd)))),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SKIP_GUARDS))
+def test_skip_guard_refuses(tmp_path, repo, name):
+    scenario, *_, went_wrong = SKIP_GUARDS[name]
+    rd = tmp_path / "runs"
+    with pytest.raises(record.RecordError):
+        scenario(record, rd, repo, tmp_path)
+    assert not went_wrong(record, rd)
+
+
+@pytest.mark.parametrize("name", sorted(SKIP_GUARDS))
+def test_each_skip_guard_catches_its_mutant(tmp_path, repo, name):
+    scenario, guard, mutant, went_wrong = SKIP_GUARDS[name]
+    assert SOURCE.count(guard) == 1, f"stale or ambiguous mutation pattern for {name}"
+    mod = load(SOURCE.replace(guard, mutant), tmp_path, f"record_skip_{name}")
+    rd = tmp_path / "runs"
+    try:
+        scenario(mod, rd, repo, tmp_path)
+    except mod.RecordError:
+        pass
+    assert went_wrong(mod, rd), name
+
+
+def test_the_required_set_follows_the_choice_and_its_filter_catches_its_mutant(rd, repo, tmp_path):
+    """With Discord, finish refuses without steps 10-16; with no Discord it does not ask for them. The mutant that
+    drops the `without` filter asks for them with no Discord too."""
+    no_discord = record.required_steps(REAL_STEPS, WITHOUT)
+    started(record, rd, repo)
+    for s in no_discord:
+        record.cmd_human(rd, s, REAL_STEPS, retro=True)
+    with pytest.raises(record.RecordError, match=r"never logged: 10, 11, 12, 13, 14, 15, 16\. "):
+        record.cmd_finish(rd, PHASES, REAL_STEPS, repo=repo)
+    guard = 'not title.startswith("(") and s not in without]'
+    mod = load(SOURCE.replace(guard, 'not title.startswith("(")]'), tmp_path, "record_without")
+    assert SOURCE.count(guard) == 1
+    assert len(mod.required_steps(REAL_STEPS, WITHOUT)) == 19  # the mutant requires the Discord steps anyway
+    record.cmd_finish(rd, PHASES, REAL_STEPS, repo=repo, discord=False, without=WITHOUT)  # no Discord: complete
+
+
+@pytest.mark.parametrize("text,want", [(None, True), ("[discord]\nguild_id = \"1\"\n", True),
+                                       ("[discord]\nenabled = true\n", True), ("[discord]\nenabled = false\n", False)])
+def test_the_record_reads_the_choice_from_kit_toml_as_written(tmp_path, text, want):
+    f = tmp_path / "kit.toml"
+    if text is not None:
+        f.write_text(text)
+    assert record.discord_on(f) is want
+
+
+def test_a_choice_that_is_not_true_or_false_is_refused(tmp_path):
+    (tmp_path / "kit.toml").write_text('[discord]\nenabled = "no"\n')
+    with pytest.raises(record.RecordError, match="true or false"):
+        record.discord_on(tmp_path / "kit.toml")
+
+
+def test_the_skip_command_reads_kit_toml(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setenv("MC_KIT_RUNS", str(tmp_path / "runs"))
+    (tmp_path / "kit.toml").write_text("[discord]\nenabled = false\n")
+    monkeypatch.setenv("MC_KIT_TOML", str(tmp_path / "kit.toml"))
+    rd = tmp_path / "runs"
+    started(record, rd, repo)
+    record.cmd_begin(rd, "P0", REAL_PHASES, now=at(1))
+    record.cmd_gate(rd, "P0", ["true"], now=at(1), runner=ok(0))
+    record.cmd_end(rd, "P0", now=at(1))
+    assert record.main(["skip", "P1"]) == 0 and "skipped, no Discord" in capsys.readouterr().out
+    (tmp_path / "kit.toml").write_text("[discord]\nenabled = true\n")
+    assert record.main(["skip", "P6"]) == 1 and "kit.toml says Discord" in capsys.readouterr().err
+
+
+def test_a_phase_skipped_then_run_as_discord_lets_the_run_finish(rd, repo, tmp_path):
+    """Skipped for no Discord, then the person chose Discord and the phase was begun and passed: finish reads the
+    phase's status now, so it seals. The mutant that reads the skip events ever recorded refuses it for good."""
+    def scenario(mod, rd):
+        started(mod, rd, repo)
+        for s in mod.required_steps(REAL_STEPS):
+            mod.cmd_human(rd, s, REAL_STEPS, retro=True)
+        _through(mod, rd, "P2")  # P1 skipped (no Discord) ...
+        mod.cmd_begin(rd, "P1", REAL_PHASES, now=at(20))  # ... then Discord after all: P1 runs and passes
+        mod.cmd_gate(rd, "P1", ["true"], now=at(20), runner=ok(0))
+        mod.cmd_end(rd, "P1", now=at(20))
+        _through(mod, rd, None, discord=True, minute=21)
+        return mod.cmd_finish(rd, REAL_PHASES, REAL_STEPS, repo=repo, now=at(90), discord=True)
+    scenario(record, rd)
+    s = json.loads((record.current(rd) / "record.json").read_text())
+    assert s["outcome"] == "complete" and "discord" not in s
+    guard = "skipped = [p for p, st in status.items() if st == SKIPPED]"
+    assert SOURCE.count(guard) == 1
+    mod = load(SOURCE.replace(guard, 'skipped = [e["phase"] for e in events if e["kind"] == "skip"]'), tmp_path,
+               "record_skip_history")
+    with pytest.raises(mod.RecordError, match="were skipped for no Discord"):
+        scenario(mod, tmp_path / "runs2")
+
+
+def test_a_discord_run_record_has_no_discord_line(rd, repo):
+    """Discord mode is unchanged: no "Discord:" line in record.md, no "discord" key in record.json or the finish
+    event (they appear only with no Discord)."""
+    run = started(record, rd, repo)
+    for s in record.required_steps(REAL_STEPS):
+        record.cmd_human(rd, s, REAL_STEPS, retro=True)
+    _through(record, rd, None, discord=True)
+    record.cmd_finish(rd, REAL_PHASES, REAL_STEPS, repo=repo, now=at(90))
+    assert "Discord:" not in (run / "record.md").read_text()
+    assert "discord" not in json.loads((run / "record.json").read_text())
+    assert all("discord" not in e for e in record.read_events(run))
+
+
+def test_begin_reads_kit_toml_only_for_a_discord_phase(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setenv("MC_KIT_RUNS", str(tmp_path / "runs"))
+    monkeypatch.setenv("MC_KIT_TOML", str(tmp_path / "kit.toml"))
+    rd = tmp_path / "runs"
+    started(record, rd, repo)
+    (tmp_path / "kit.toml").write_text("not [valid toml")  # mid-edit: begin P0 never reads it
+    assert record.main(["begin", "P0"]) == 0
+    record.cmd_gate(rd, "P0", ["true"], now=at(1), runner=ok(0))
+    record.cmd_end(rd, "P0", now=at(1))
+    (tmp_path / "kit.toml").write_text("[discord]\nenabled = false\n")
+    assert record.main(["begin", "P1"]) == 1 and "record.py skip P1" in capsys.readouterr().err
+    (tmp_path / "kit.toml").write_text("[discord]\nenabled = true\n")
+    assert record.main(["begin", "P1"]) == 0

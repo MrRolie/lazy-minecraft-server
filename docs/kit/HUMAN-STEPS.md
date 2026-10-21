@@ -9,24 +9,27 @@ from primary docs, and it has been clicked through end to end once: the proof ru
 **20** one-time steps: 18 from this list, plus a captcha on each bot's **Authorize**. Under the rule below, a
 captcha is one more click inside steps 13 and 16, not a step of its own, so the run's N is **18**. Step 23 (choose
 the pack) was added after the run, which makes **19** for a person like that one (who already had Discord). Step
-23 has not been measured live yet. `python3 kit/record.py human <id>` logs each step as it happens; a step not on
-this list is logged as `--unplanned`, and both go into the run record.
+23 has not been measured live yet. Nor has a run with **no Discord** (operator ruling 2026-10-20: Discord is now a
+choice at step 23): its 12 is counted from this list, not measured. `python3 kit/record.py human <id>` logs each
+step as it happens; a step not on this list is logged as `--unplanned`, and both go into the run record.
 
 **One step = one task you do in one place.** Click counts in brackets are detail and do not change N. The `### id.`
 headings are the ids `kit/record.py` accepts; keep them stable.
 
 | Who | Steps | Count |
 |---|---|---|
-| You, once | 1–23 | **20** (19 if you already have Discord: step 9). Plus optional step 3, and conditional steps 19 (a Wi-Fi password, only for Wi-Fi) and 20 (a router range, only for a fixed address) |
-| Each friend, once | F1–F10 | **10** (most friends already have F1, and some have F2) |
-| You, now and then | R1–R2 | 2 |
+| You, once | 1–23 | **20** (19 if you already have Discord: step 9). **12 with no Discord** (steps 9–16 drop). Plus optional step 3, and conditional steps 19 (a Wi-Fi password, only for Wi-Fi) and 20 (a router range, only for a fixed address) |
+| Each friend, once | F1–F10 | **10** (most friends already have F1, and some have F2). **9 with no Discord** (no F2) |
+| You, now and then | R1–R3 | 2 (**3 with no Discord**: R3, adding each friend to the server) |
 
 **The promise:** "you do about 20 things once (19 if you already have Discord), each friend does 10; Claude does
 the rest." Where 20 comes from, in one line: the kit's first design had 17 one-time steps (1, 2 and 4–18, with step
 9), plus two from the design decisions and the one-machine set-up (revoking the Tailscale token, 21, and logging back
 in after the test restart, 22), make 19 with Discord sign-up and 18 without; the proof run measured the 18 (its host
 had Discord). Choosing the pack (23) came after the run: 20 with step 9, 19 without. Steps 19 and 20 (a Wi-Fi
-password, a router range) are conditional and were never in the first design's 17.
+password, a router range) are conditional and were never in the first design's 17. With no Discord (step 23's second
+question, one more click on the same card, so no new step), steps 10–16 drop as well as 9: 19 − 7 = 12, and the
+promise is "you do about 12 things once, each friend does 9".
 
 **Settled by the proof run:** a captcha on **Authorize** came up for both bots (it is part of steps 13 and 16);
 Message Content for the bridge bot went through Discord's API with no clicks from the person (step 14); the
@@ -120,9 +123,11 @@ then sets `eula_accepted = true` in `kit.toml`. It never sets it without your ye
 
 ## You, once: the pack
 
-### 23. Choose the pack
+### 23. Choose the pack, and Discord or not
 
-Right after Claude checks the laptop, it shows you a card with two choices (1 click):
+Right after Claude checks the laptop, it shows you one card with two questions (2 clicks).
+
+Which game:
 - **Vanilla Extended** (recommended): Minecraft as if Mojang had kept adding structures, bosses and places to
   explore, and it still feels like Minecraft. It is the pack the kit's proof run went through end to end.
 - **Something different:** a conversation. Claude asks what you want the game to feel like and how many people play
@@ -130,9 +135,19 @@ Right after Claude checks the laptop, it shows you a card with two choices (1 cl
   it can promise: the pack passes the kit's checks and starts once in a recorded test, nothing more. It is not the
   path the proof run tested (`docs/kit/CUSTOM-PACK.md`).
 
+Discord or not:
+- **Discord:** a Discord server for your group. Game chat shows up in Discord and back, friends add themselves to
+  the server, and you get a message when something on the server breaks. It costs you steps 9–16 below, about 15
+  minutes.
+- **No Discord:** skip all of that. Claude writes you one message to send your friends however you already talk,
+  and you add each friend by their Minecraft name (R3). The server still restarts and repairs itself, but **nobody
+  is told when something fails**: if it seems down, ask Claude to look.
+
 Vanilla Extended takes a minute. Something different is a longer conversation (not measured yet).
 
 ## You, once: Discord
+
+Only if you chose Discord at step 23. With no Discord, skip this whole part (steps 9–16) and go on to Tailscale.
 
 Claude needs two bots in your Discord server: an admin bot that builds the channels, and a separate, weaker bot
 that carries chat between the game and Discord. Keeping them apart means the bot that talks to the game all day
@@ -238,8 +253,9 @@ and tell Claude the start and end of the range.
 
 ## Each friend, once
 
-Claude posts all of this in your Discord's `#setup` channel. Most of it is a one-time setup on the friend's own
-computer.
+With Discord, Claude posts all of this in your Discord's `#setup` channel. With no Discord, it is all in the
+message Claude writes for you at the end (`~/minecraft-friend-message.txt`): you send it to your friends however you
+talk, with the pack file it names. Most of it is a one-time setup on the friend's own computer.
 
 ### F1. Own Minecraft Java Edition
 
@@ -248,7 +264,8 @@ parent's account with multiplayer allowed.
 
 ### F2. Join the Discord server
 
-Open the invite link you send them, and make a Discord account if needed. Claude's invite link lasts 7 days, so a
+Only with Discord; with no Discord, friends skip it. Open the invite link you send them, and make a Discord
+account if needed. Claude's invite link lasts 7 days, so a
 leaked one stops working; ask Claude for a fresh one when it runs out.
 
 ### F3. Install Tailscale
@@ -262,7 +279,7 @@ cannot accept a share.
 
 ### F5. Accept the share link
 
-Open the share link in `#setup` and click **Accept**.
+Open the share link in `#setup` (with no Discord: in your message) and click **Accept**.
 
 ### F6. Install a launcher
 
@@ -274,7 +291,7 @@ Needed when the game first launches, not at import.
 
 ### F8. Import the pack
 
-Download the `.mrpack` from `#setup`, then:
+Download the `.mrpack` from `#setup` (with no Discord: the file you sent with your message), then:
 - Prism: **Add Instance** → **Import** → **Browse** → **OK**.
 - Modrinth App: **Create new instance** → **Upload a modpack**. It shows an "unknown modpack" warning first;
   that is expected.
@@ -285,8 +302,9 @@ In the launcher's instance settings (about 4 clicks).
 
 ### F10. Whitelist yourself
 
-In Discord, run `/whitelist <your Minecraft name>`. After that, the server is already in the game's
-**Multiplayer** list: one click to join.
+In Discord, run `/whitelist <your Minecraft name>`. With no Discord: send your Minecraft name to the person who
+runs the server, and they add you (R3). After that, the server is already in the game's **Multiplayer** list: one
+click to join.
 
 ## You, now and then
 
@@ -295,9 +313,20 @@ In Discord, run `/whitelist <your Minecraft name>`. After that, the server is al
 Share links that nobody used expire after 30 days. When a new friend arrives after that: Tailscale admin console
 → **Machines** → the server → **Share** → **Copy share link**. Then, in your second terminal, run
 `python3 kit/secret.py share-link` from the server's folder and paste only the link at its prompt (it will not
-show). It replaces the old link in `discord/.env`. Claude updates `#setup`.
+show). It replaces the old link in `discord/.env`. Claude updates `#setup`; with no Discord, Claude writes your
+friend message again (`python3 kit/friends.py`), and you send the new one.
 
 ### R2. Log in to Claude Code again
 
 When Claude Code says your login is about to expire (it warns 3 days ahead), run `claude` and log in again as in
 step 6.
+
+### R3. (No Discord) Add a friend to the server
+
+With Discord, friends add themselves (F10). With no Discord, the server only lets in names you add. When a friend
+sends you their Minecraft name, tell Claude "whitelist <their name>", and it tells you when it is done. Or do it
+yourself, in a terminal, with Steve replaced by their Minecraft name:
+
+```sh
+cd ~/minecraft-ai-host && docker compose exec minecraft rcon-cli whitelist add Steve
+```

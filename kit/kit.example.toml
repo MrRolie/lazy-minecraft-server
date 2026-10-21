@@ -54,6 +54,8 @@ tag = "tag:mc-server"
 # device_id = "..."                    # optional; from the Tailscale API
 
 [discord]
+# enabled = false                      # NO Discord (the person's choice at the card, HUMAN-STEPS step 23): then this
+                                       # is the section's only line; delete the five below. Absent: Discord
 guild_id = "000000000000000000"        # the server (guild) id: its one home; render copies it into .env.bridge.
 bridge_bot_id = "000000000000000000"   # the bridge bot's user id. Both: python3 discord/bootstrap.py discover
                                        # (the zeros are a placeholder kit.toml refuses)

@@ -171,7 +171,21 @@ def write_share_link(path, link, today=None):
     except tailscale.TsError as e:
         raise SecretError(f"{e}") from None
     return (f"TAILSCALE_SHARE_LINK written to discord/.env (mode 600) with TAILSCALE_SHARE_LINK_DATE={today}; the "
-            "file's other lines are as they were. Next: python3 discord/sync.py (dry run), then --apply")
+            f"file's other lines are as they were. Next: {share_link_next()}")
+
+
+SYNC_NEXT = "python3 discord/sync.py (dry run), then --apply"
+FRIENDS_NEXT = "python3 kit/friends.py (it writes the friend message again, with the new link)"
+
+
+def share_link_next():
+    """Where the new link goes next: #setup (sync) with Discord, the friend message with none (kit.toml's choice as
+    written, kitconfig.discord_choice). A kit.toml that cannot be read names both, never a guess."""
+    import kitconfig
+    try:
+        return SYNC_NEXT if kitconfig.discord_choice() else FRIENDS_NEXT
+    except kitconfig.ConfigError:
+        return f"{SYNC_NEXT}; with no Discord (kit.toml discord.enabled = false), {FRIENDS_NEXT}"
 
 
 def read_hidden(prompt):

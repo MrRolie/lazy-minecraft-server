@@ -131,6 +131,9 @@ side = "both"               # server | client | both
 
 ### The #welcome intro
 
+Only with Discord: a server with no Discord (`discord.enabled = false`, KIT.md "With no Discord") has no `#welcome`,
+so skip this part.
+
 `#welcome` opens, under its heading "Welcome 👋", with what the game on this server is. Vanilla Extended's opening is
 `pack/welcome-intro.md`. A custom pack's is `pack-custom/welcome-intro.md`, and you write it now, from the brief
 (step 1) and the list (step 3). Friends read it before they join, so write it the way `pack/welcome-intro.md` is
@@ -190,16 +193,17 @@ booted to `Done` and left nothing behind.
 ## 7. Tell the person, then go back to KIT.md
 
 Tell them what they have, plainly: the pack's name, the mods (one line each), and the claim from the top of this
-page. Then carry on with KIT.md: the rest of P5's gates, then P6.
+page. Then carry on with KIT.md: the rest of P5's gates, then P6 (skipped with no Discord).
 
-What follows the pack on its own: the server list entry friends get (`servers.dat`), the name in `#setup`, the
-server's MOTD, `#welcome`'s opening (the intro from step 4), and the backups (`deploy/backup.sh` also saves
+What follows the pack on its own: the server list entry friends get (`servers.dat`), the name in `#setup` (with no
+Discord, in the friend message `kit/friends.py` writes), the server's MOTD, `#welcome`'s opening (the intro from
+step 4, with Discord), and the backups (`deploy/backup.sh` also saves
 `pack-custom/`'s mods.toml, lock.json, overrides and intro, since they are in no git history).
 
 ## Already running a custom pack?
 
-A server set up with a custom pack before 2026-10-20 has no `pack-custom/welcome-intro.md`, and its `#welcome` still
-opens with Vanilla Extended's text. After `git pull`, the first `python3 discord/sync.py` refuses and names that
+Only with Discord (a server with no Discord has no `#welcome` to fix). If `pack-custom/` has no `welcome-intro.md`
+(the server was set up before the kit wrote one), its `#welcome` still opens with Vanilla Extended's text. After `git pull`, the first `python3 discord/sync.py` refuses and names that
 file. That is expected, and nothing has been changed yet. Then:
 
 1. Write `pack-custom/welcome-intro.md` with the person, as in step 4 "The #welcome intro" (`pack-custom/mods.toml`
@@ -237,8 +241,9 @@ maintenance reboot. So it keeps naming the old pack until the new one has booted
    It boots the new pack on a throwaway copy of the world, then deletes the copy. The friends' world and the
    override are not touched.
 5. If it passes: `python3 kit/render.py` (now the override names the new file), `docker compose up -d minecraft`,
-   `python3 discord/sync.py --apply` so `#setup` carries the new file, then
-   `bash deploy/world.sh maintenance off`. Announce it in `#announcements`.
+   `python3 discord/sync.py --apply` so `#setup` carries the new file (with no Discord: `python3 kit/friends.py`,
+   so the friend message names it), then `bash deploy/world.sh maintenance off`. Announce it in `#announcements`
+   (with no Discord, the person tells their friends and sends them the new file).
 6. If it fails: put the old `pack-custom/mods.toml` and `lock.json` back from the step-1 backup, which holds both
    (`tar -xzf backups/world-<time>.tar.gz pack-custom/mods.toml pack-custom/lock.json`, from the server's folder).
    Then `docker compose up -d minecraft` (the override still names the old pack) and

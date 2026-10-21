@@ -1,0 +1,29 @@
+Hey! I set up a Minecraft server for us. It's private, so there are a few one-time steps first.
+
+1. Get on the private network (Tailscale)
+The server isn't on the open internet. You reach it through Tailscale, a free app that makes a private link between your computer and the server.
+- Install it: https://tailscale.com/download
+- Sign in with any account (Google, Microsoft, GitHub...). It's free. Use your own account: a work or school Tailscale account can't accept the share.
+- Open this link and accept the share: {share_link}
+- Your Tailscale app should now list {host_name}. That's the server, and it's the only thing the link gives you access to.
+Tailscale starts with your computer; just leave it running.
+
+2. Install the modpack
+I'm sending you a file with this message: {pack_file}. Import it into a launcher. Either of these works:
+- Prism Launcher (https://prismlauncher.org): Add Instance > Import > pick the file > OK.
+- Modrinth App (https://modrinth.com/app): Create new instance > Upload a modpack > pick the file. It may warn that the pack isn't hosted on Modrinth ("unknown modpack"): that's expected, so go ahead.
+The launcher downloads Minecraft, Fabric and all the mods for you, so don't add mods yourself. You sign in with your Microsoft account when you first launch the game.
+Give it 4-6 GB of memory:
+- Prism: right-click the instance > Edit > Settings > Java tab > tick Memory > Maximum memory allocation 4096-6144 MB.
+- Modrinth App: open the instance's settings and find Custom memory allocation (recent versions have it under Sync overrides) > 4096-6144 MB.
+
+When a new chapter comes out, I'll send you a new pack file. Import it the same way and play on the new instance. Your builds and items live on the server, so nothing is lost. You may have to redo your keybinds and video settings.
+
+3. Send me your Minecraft name
+The server only lets in people on its list. Reply with your Minecraft username and I'll add you.
+
+4. Play
+Minecraft > Multiplayer: {pack_name} is already in your list. Double-click it.
+If it's missing, Add Server: {server_address}
+
+Can't connect? Check that Tailscale is on and shows {host_name}, and use the full address above. "Incompatible mods" or version errors? You're probably on an old version of the pack: ask me for the newest file and import it the same way. Your game and the server have to match.

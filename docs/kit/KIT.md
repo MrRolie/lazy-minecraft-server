@@ -8,7 +8,8 @@ person, and what to tell them. The person's side is `docs/kit/HUMAN-STEPS.md`.
 `20261016T030748Z`) went through every phase; what it found, and what fixed each finding, is `docs/kit/2026-10-16_proof-run-findings.md`.
 The fixes from that run (the pack card after P0, the token tool, P6's `clean`, P9's `world.sh done`, P11's
 look-back) are built and tested against fakes, but no run has gone through them yet: they are **[verify live]**
-until the next one. When a step here proves wrong, fix this page in the same change.
+until the next one. So is the whole **no-Discord path** (operator ruling 2026-10-20, "With no Discord" below):
+built and tested against fakes, never run. When a step here proves wrong, fix this page in the same change.
 
 ## The rules that bind you here
 
@@ -23,7 +24,8 @@ until the next one. When a step here proves wrong, fix this page in the same cha
 - **Secrets never enter the chat or a file in git.** Tokens arrive through a hidden prompt the person runs in a
   **second terminal window** (the one they opened at human step 7). Never ask for a password, a Discord user token
   or a login. Never `cat`, `grep` or print `.env`, `.env.bridge`, `discord/.env`, `/etc/mc-host/webhook`, the staged
-  webhook or the Tailscale token file. The kit's tools read them and print only what you need.
+  webhook, the Tailscale token file or the friend message (`~/minecraft-friend-message.txt`: it holds the share
+  link). The kit's tools read them and print only what you need.
 - **Docker prints those secrets too.** Compose resolves `.env` and `.env.bridge` into every container, so never run
   `docker inspect`, `docker compose exec ... env` (or `printenv`), or `docker compose config` with its output
   showing: only ever `docker compose config -q 2>/dev/null`, as the gates do. Its parse error can quote a token. When
@@ -36,8 +38,9 @@ until the next one. When a step here proves wrong, fix this page in the same cha
   HUMAN-STEPS.md), and roughly how long it takes. Say when they can walk away (the build, the world pre-generation)
   and when you need them back.
 - `kit.toml` is the instance's one config file (`kit/kit.example.toml`, schema `kit/kitconfig.py`). You fill it in
-  phase by phase (P0 host and network, P1 Discord, P3 Tailscale, P4 the server); after any change to it once it is
-  complete, `python3 kit/render.py`. Never edit `host/kit.env`, `host/rendered/` or the rendered `.env` keys by hand.
+  phase by phase (P0 host, network and the Discord choice, P1 Discord, P3 Tailscale, P4 the server); after any change
+  to it once it is complete, `python3 kit/render.py`. Never edit `host/kit.env`, `host/rendered/` or the rendered
+  `.env` keys by hand.
 
 ## The run record
 
@@ -66,6 +69,9 @@ python3 kit/record.py end P4                         # pass only if every gate e
   "INCOMPLETE, at least n", never the measured N.
 - N counts the host owner's one-time steps (and the unplanned ones). A friend's step (F10 in P11) is logged too,
   but the record lists it on its own line, outside N.
+- With no Discord (below), a Discord-only phase is skipped, not begun: `skip` refuses unless `kit.toml` says
+  `discord.enabled = false`, and the record shows the phase as "skipped", never as passed. `status` and `finish`
+  read the same key: the Discord steps (9–16) are then not required.
 - Notes, observations and gate commands that look like a token, a share link, a webhook URL or a long random
   string (the RCON password) are refused: the record is handed back.
 
@@ -82,6 +88,25 @@ Every phase below runs a built, tested tool. What is still open, and what you do
 | An off-host backup | none yet: backups are on the laptop's own disk |
 | A pack other than Vanilla Extended (design decision, 2026-10-14) | On the person's choice at the pack card (P0): `docs/kit/CUSTOM-PACK.md`. Modrinth only, Fabric 26.1.2 / loader 0.19.5, sized to the RAM. Claim only "passes the build/lint gates and booted once in a recorded test; not the path the kit's proof run tested" |
 | The battery charge cap | `mc-charge-cap` writes it at every boot; it is reported "written", never "verified" (drivers round it, and asus-wmi reads back its own cache) |
+
+## With no Discord
+
+The person chooses at the card after P0 (human step 23, below): Discord for their group, or no Discord (operator
+ruling 2026-10-20: Discord was the longest part of the first friend's run, and not every group wants it). The
+choice lives in `kit.toml` as `discord.enabled = false`, the `[discord]` section's only line. Absent, it is Discord,
+the default, and everything on this page runs as it always has. With no Discord:
+
+| Where | What changes |
+|---|---|
+| P1, P6, P11 | Skipped with `record.py skip` instead of `begin`, as each of those phases says. No bots, no guild, no chat bridge |
+| Human steps | 9–16 are not asked for (HUMAN-STEPS "You, once: Discord"): about 12 one-time steps instead of 20 (19 if they already have Discord) |
+| P7 | The alert gate checks that alerts are **off** (no webhook): the watchdogs still restart and repair, but nobody is told when something fails. `check.sh` says so as an INFO line |
+| P10 | No bridge to start at boot, so no "bridge did not start" alert either |
+| P12 | No sync and no invite: `kit/friends.py` writes one message for the person to send their friends, and you whitelist the person |
+| After launch | A friend gets on the whitelist when the person tells you their Minecraft name (HUMAN-STEPS R3) |
+
+`discord/sync.py` and `discord/bootstrap.py` refuse to run on such a server. Switching later, either way, is not a
+kit step yet: say so if the person asks.
 
 ## Before P0: get the repo onto the laptop
 
@@ -121,8 +146,8 @@ set up the server.
    If `sudo -n true` asks for a password, the drop-in is not in place: read `sudo bash kit/sudoers.sh check`'s
    answer with them (it refuses a file it did not write) before anything else.
 
-Tell them: "I'll check the laptop first and ask you which game you want on it, then we'll set up Discord together.
-That part needs you for about 15 minutes; after that it's mostly me."
+Tell them: "I'll check the laptop first, then ask you two things: which game you want on it, and whether your group
+wants a Discord server. Discord needs you for about 15 minutes; after that it's mostly me."
 
 ## P0. Probe
 
@@ -164,8 +189,9 @@ cd ~/minecraft-ai-host && cp -n kit/kit.example.toml kit.toml && python3 -c 'imp
 
 ### The pack (human step 23)
 
-Now the RAM is known, ask which pack the server runs. Ask with the **AskUserQuestion** tool, so the person gets a
-card, not a wall of text. One question ("Which game do you want on the server?"), two options, in this order:
+Now the RAM is known, ask which pack the server runs, and whether the group wants Discord.
+Ask with the **AskUserQuestion** tool, so the person gets a card, not a wall of text: one card, two questions (one
+step, two clicks). The first question is "Which game do you want on the server?", with two options, in this order:
 
 1. **Vanilla Extended (Recommended).** Description: "Minecraft as if Mojang had kept adding structures, bosses and
    places to explore. It still feels like Minecraft, and it's the pack the kit's test run went through end to end."
@@ -173,12 +199,24 @@ card, not a wall of text. One question ("Which game do you want on the server?")
    it on Modrinth, sized to this laptop. I can promise it passes the kit's checks and starts once in a test, nothing
    more."
 
-Log it once, the moment they answer. The note is the option they picked, one word: `vanilla-extended` or `custom`.
+The second question is "Does your group want a Discord server for the game?", two options, in this order:
+
+1. **Discord.** Description: "A Discord server for your group: game chat shows up in Discord and back, friends add
+   themselves to the server, and you get a message when something on the server breaks. About 15 minutes of clicks
+   with me (a Discord server and two bots)."
+2. **No Discord.** Description: "Skip it. I write one message you send your friends however you already talk, and
+   you add each friend by their Minecraft name. The server still repairs itself, but nobody gets told when
+   something fails."
+
+Log it once, the moment they answer. The note is the two options they picked, one word each:
+`vanilla-extended` or `custom`, then `discord` or `no-discord`.
 
 ```sh
-python3 kit/record.py human 23 --note "<vanilla-extended or custom>"
+python3 kit/record.py human 23 --note "<vanilla-extended or custom>, <discord or no-discord>"
 ```
 
+- **No Discord:** make `kit.toml`'s `[discord]` section the one line `enabled = false` (delete the other five),
+  and follow "With no Discord" above from here on. **Discord:** leave the section as the example has it.
 - **Vanilla Extended:** keep `pack.mode = "vanilla-extended"` in `kit.toml` and go on to P1.
 - **Something different:** follow `docs/kit/CUSTOM-PACK.md` steps 1–4 now (it ends with `pack.mode = "custom"`).
   Step 23 is already logged: do not log it again. The pack's name reaches the record in P5, whose spike line
@@ -187,8 +225,13 @@ python3 kit/record.py human 23 --note "<vanilla-extended or custom>"
 
 ## P1. Discord (human steps 9–16)
 
-First, because it needs nothing from the host. Tell them: "Now Discord. You'll make a server and two bots; I'll
-tell you each click. About 15 minutes."
+First, because it needs nothing from the host. **No Discord:** skip this phase, then go on to P2:
+
+```sh
+python3 kit/record.py skip P1
+```
+
+Tell them: "Now Discord. You'll make a server and two bots; I'll tell you each click. About 15 minutes."
 
 1. `python3 kit/record.py begin P1`.
 2. Steps 9 (if needed), 10 and 11: walk them through, logging each as they finish it:
@@ -368,6 +411,12 @@ bytes, stop and find out why; never move it aside on your own.
 
 ## P6. Guild bootstrap
 
+**No Discord:** there is no guild. Skip this phase, then go on to P7:
+
+```sh
+python3 kit/record.py skip P6
+```
+
 This is safe before launch: no friends are in the guild yet. With `discord.profile = "kit"`, the guild gets the
 kit's own content: `#setup` from `discord/content/kit/setup.md` (this server's address and share link) and the
 shared welcome, which opens with the pack's own intro (`pack/welcome-intro.md`, or a custom pack's
@@ -423,13 +472,31 @@ python3 kit/record.py begin P7
 sudo bash host/setup.sh                 # then read its "next steps" list
 python3 kit/record.py gate P7 -- sh -c 'log="$HOME/.cache/mc-kit-setup-rerun.log"; mkdir -p "${log%/*}"; sudo bash host/setup.sh >"$log" 2>&1; rc=$?; cat "$log" >&2; [ "$rc" -eq 0 ] && ! grep -E "^   (installed|created|enabled|fixed|masked|reloaded|removed|restarted|set |armed|confirmed|applying|systemctl daemon-reload|loginctl enable-linger|mc-charge-cap: |rfkill: unblocked|nmcli: wifi radio on)|^   .* -> |: changed$" "$log"'
 python3 kit/record.py gate P7 -- sudo bash host/check.sh --no-ssh     # without --no-ssh when they want SSH (below)
-python3 kit/record.py gate P7 -- sh -c '/usr/local/sbin/mc-alert "kit: the alert path works" 2>&1 | grep "posted (HTTP 204)"'
 python3 kit/record.py gate P7 -- sh -c 'systemd-analyze verify /etc/systemd/system/mc-*.service /etc/systemd/system/mc-*.timer'
+```
+
+Then the alert gate, which depends on the choice at step 23. **With Discord**, a test alert reaches `#alerts`:
+
+```sh
+python3 kit/record.py gate P7 -- sh -c '/usr/local/sbin/mc-alert "kit: the alert path works" 2>&1 | grep "posted (HTTP 204)"'
+```
+
+**With no Discord**, mc-alert says alerts are off and posts nothing (the "No Discord" note below):
+
+```sh
+python3 kit/record.py gate P7 -- sh -c '/usr/local/sbin/mc-alert "kit: the alert path works" 2>&1 | grep "alerts are off"'
+```
+
+```sh
 python3 kit/record.py end P7
 ```
 
 - The first run installs everything: the units and scripts, linger (step 12), the charge cap when `kit.toml` has one
   (step 13), and the webhook P6 staged (step 7). It never arms the server: that is P10's `--stand-up`.
+- **No Discord:** there is no webhook, so alerts are off, on purpose. Step 7 logs "off: no Discord" and owes
+  nothing, and `check.sh` prints an INFO line, not a FAIL. Run only the no-Discord alert gate above: the Discord one
+  (`grep "posted (HTTP 204)"`) cannot pass on such a server. Tell the person plainly: "The server still restarts and repairs itself, but with no Discord nobody gets told
+  when something fails. If it seems down, ask me to look."
 - The second `setup.sh` (the first gate) must change nothing. Its change words are taken from `setup.sh`'s log
   lines at this commit; if the gate trips on a line that is not a change, fix the gate here, and if it is a change,
   that is a bug: stop.
@@ -538,7 +605,8 @@ The fresh backup is a gate (`CLAUDE.md`: a fresh backup before any server-side c
 world, its pack or a backup is missing, or when any earlier step aborted. If either gate fails, stop: no reboot.
 
 The bridge image does not exist until P11, so `mc-bridge-up` posts a "bridge did not start" alert in `#ops-log`;
-that one is expected.
+that one is expected. With no Discord, `mc-bridge-up` sees `MC_DISCORD="off"` in kit.env and starts nothing, says
+nothing but one journal line, and the boot is the same otherwise.
 
 Tell them: "Last check of this part: I'll restart the laptop to prove the server comes back by itself. Claude
 closes too. When the laptop is back, log in, open a terminal, and run `claude --continue`." Then, only if both
@@ -556,6 +624,12 @@ python3 kit/record.py end P10
 Plain `docker` works from here on: the login gave your shell the docker group.
 
 ## P11. The chat bridge
+
+**No Discord:** there is no bridge. Skip this phase, then go on to P12:
+
+```sh
+python3 kit/record.py skip P11
+```
 
 ```sh
 python3 kit/record.py begin P11
@@ -582,7 +656,7 @@ writes, which is player chat and game messages, not a console `say`):
    line only, and say so in the record.
 
 ```sh
-python3 kit/record.py gate P11 -- sh -c 'docker compose exec minecraft rcon-cli whitelist list | grep -qiF "$(python3 -c "import tomllib; print(tomllib.load(open(\"kit.toml\", \"rb\"))[\"server\"][\"owner_name\"])")"'
+python3 kit/record.py gate P11 -- sh -c 'n=$(python3 -c "import tomllib; print(tomllib.load(open(\"kit.toml\", \"rb\"))[\"server\"][\"owner_name\"])") && [ -n "$n" ] && docker compose exec minecraft rcon-cli whitelist list | sed "s/^[^:]*: *//" | tr "," "\n" | tr -d " \r" | grep -qixF "$n"'
 python3 kit/record.py gate P11 -- sh -c 's=$(python3 kit/record.py began P11) && docker compose logs --since "$s" minecraft | grep -F "kit-check-"'
 python3 kit/record.py observe P11 "<what the person saw in Discord: the /whitelist answer, and in #game-chat, #coords and #discoveries>"
 python3 kit/record.py end P11
@@ -591,6 +665,8 @@ python3 kit/record.py end P11
 Keep the `&&` in the second gate: `--since ""` would read the whole log.
 
 ## P12. Launch
+
+With Discord, the steps and gates right below. **No Discord:** "P12 with no Discord" after them, instead.
 
 1. Set `server.open_date` in `kit.toml` to today, `python3 kit/render.py`, and sync: `python3 discord/sync.py`
    (dry run: the `#welcome` status line becomes "open"), then `python3 discord/sync.py --apply`.
@@ -609,15 +685,58 @@ python3 kit/record.py end P12
 python3 kit/record.py finish
 ```
 
-`finish` refuses while a required step was never logged, and names it: if the person did it, log it with
-`--note "logged late"` and finish again; `finish --incomplete` is only for a run that really misses one.
+### P12 with no Discord
 
-Tell them what they have, in plain words: the server, the invite link to send friends, what each friend does
-(HUMAN-STEPS "Each friend"), and the two things that come back now and then (R1, R2). Give them the path of
-`record.md`. **For a test run of the kit itself,** its maintainer takes the record from the run directory; never write
-anywhere outside this checkout yourself.
+1. `python3 kit/record.py begin P12`. Set `server.open_date` in `kit.toml` to today, then `python3 kit/render.py`.
+   There is nothing to sync.
+2. Put the person on the whitelist (with Discord, P11's `/whitelist` does it). Their name is `server.owner_name`:
+   `docker compose exec minecraft rcon-cli whitelist add <their Minecraft name>`.
+3. The friend message: `python3 kit/friends.py`. It writes one ready-to-paste message for the person's friends to
+   `~/minecraft-friend-message.txt` (mode 600) and prints only that path: the share link inside never reaches this
+   chat, so **never read, cat or grep the file yourself.** The message holds the share link, the pack file's name,
+   the server's address, and "send me your Minecraft name". At its top, outside the message, it tells the person where
+   the pack file is on this laptop (`dist/<file>.mrpack`), to send with it.
+4. Tell them: "Your friend message is ready. Open the file `minecraft-friend-message.txt` in your home folder (in
+   the Files app, Home), copy everything between the two dashed lines, and send it to your friends however you
+   usually talk, with the pack file it names attached. The link in it is private: send it to friends only." If they
+   want it opened for them, `xdg-open ~/minecraft-friend-message.txt` opens it in their text editor without
+   printing it here.
+5. The sudoers drop-in **stays**, as with Discord (step 3 above).
+
+```sh
+python3 kit/record.py gate P12 -- python3 kit/friends.py --check
+python3 kit/record.py gate P12 -- sh -c 'n=$(python3 -c "import tomllib; print(tomllib.load(open(\"kit.toml\", \"rb\"))[\"server\"][\"owner_name\"])") && [ -n "$n" ] && docker compose exec minecraft rcon-cli whitelist list | sed "s/^[^:]*: *//" | tr "," "\n" | tr -d " \r" | grep -qixF "$n"'
+python3 kit/record.py gate P12 -- python3 kit/render.py --check
+python3 kit/record.py end P12
+python3 kit/record.py finish
+```
+
+`friends.py --check` passes only while the file is exactly what it would write now, at mode 600: after a new share
+link or a new pack file, run `python3 kit/friends.py` again.
+
+### The end of the run (both)
+
+`finish` refuses while a required step was never logged, and names it: if the person did it, log it with
+`--note "logged late"` and finish again; `finish --incomplete` is only for a run that really misses one. With no
+Discord, `finish` does not ask for steps 9–16, and the record says the Discord phases were skipped.
+
+Tell them what they have, in plain words: the server; how friends get in (with Discord, the invite link; with no
+Discord, the friend message); what each friend does (HUMAN-STEPS "Each friend"); and what comes back now and then
+(R1, R2, and with no Discord R3: adding a friend to the whitelist). With no Discord, say once more that alerts are
+off: the server repairs itself, but nobody is told when something fails. Give them the path of `record.md`. **For a
+test run of the kit itself,** its maintainer takes the record from the run directory; never write anywhere outside
+this checkout yourself.
 
 ## After launch
 
 Chapters, fixes, Docker upgrades, restores: `AGENTS.md`, which is this repo's operational truth for any instance.
 The friend-server doctrine is `CLAUDE.md`.
+
+With no Discord:
+- **A new friend** (HUMAN-STEPS R3): when the person tells you a friend's Minecraft name, check it is 3–16 letters,
+  digits or `_` (refuse anything else: it goes into a command), then
+  `docker compose exec minecraft rcon-cli whitelist add <name>`, and read the answer back to them. A late friend
+  whose share link expired: R1, then `python3 kit/friends.py` writes the message again with the fresh link.
+- **A chapter** (a new pack version): the announcement `CLAUDE.md` puts in `#announcements` goes out through the
+  person instead. After the new pack is live, `python3 kit/friends.py` writes the message again with the new file's
+  name, and the person sends friends the new file.

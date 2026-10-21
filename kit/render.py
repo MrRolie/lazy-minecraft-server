@@ -12,7 +12,8 @@ Outputs, all under the repo (--repo DIR renders another checkout, e.g. a test co
   host/rendered/systemd/     every host/systemd/**/*.in with @KEY@ (a kit.env key) filled in. systemd does not
                              expand env in User= or WorkingDirectory=, so the units are rendered, not configured
   .env                       the compose keys, merged by key (COMPOSE_KEYS, PASSTHROUGH_KEYS)
-  .env.bridge                DISCORD_GUILD_ID, merged by key
+  .env.bridge                DISCORD_GUILD_ID, merged by key. Discord only: with discord.enabled = false there is
+                             no bridge, and render neither writes nor checks it
   docker-compose.override.yml   pack.mode = "custom" only: MODRINTH_MODPACK and MOTD from pack-custom/mods.toml
                              (compose merges it over docker-compose.yml). Vanilla Extended writes none: its pack is
                              docker-compose.yml's own line, so asus-node renders exactly what it did before
@@ -86,7 +87,18 @@ def kit_env_values(cfg):
         "MC_SERVER_ADDRESS": t["server_address"],
         # The battery charge cap host/bin/mc-charge-cap writes at every boot; "none" = no cap (no [battery] section).
         "MC_CHARGE_CAP": str(charge_cap(cfg)),
+        # No Discord (discord.enabled = false) only. Written only then, so a Discord instance's kit.env is the same
+        # bytes as before the choice existed (asus-node's golden); setup.sh, check.sh, mc-bridge-up and mc-alert read
+        # an absent key as Discord, the stricter mode (the webhook and the bridge are then checked).
+        **({} if kitconfig.discord_enabled(cfg) else {"MC_DISCORD": "off"}),
     }
+
+
+# Every key kit_env_values() can write, in its order: setup.sh's and check.sh's KIT_KEYS allowlist is this list
+# (host/test_host.py is its alarm). MC_DISCORD is the one key written only for some configs.
+KIT_ENV_KEYS = ("MC_HOST_NAME", "MC_USER", "MC_HOME", "MC_REPO", "MC_UID", "MC_GID", "MC_TZ", "MC_NET_MODE",
+                "MC_WIRED_CONN", "MC_WIFI_CONN", "MC_WIRED_ADDR", "MC_WIRED_GW", "MC_WIRED_DNS", "MC_MAINT_START",
+                "MC_TS_HOST_NAME", "MC_SERVER_ADDRESS", "MC_CHARGE_CAP", "MC_DISCORD")
 
 
 def charge_cap(cfg):
@@ -426,7 +438,11 @@ ENV_FILES = (".env", ".env.bridge")
 
 
 def env_updates(cfg):
-    return {".env": compose_env_values(cfg), ".env.bridge": bridge_env_values(cfg)}
+    """-> {env file: its keys}. With no Discord there is no bridge, so .env.bridge is neither written nor checked."""
+    out = {".env": compose_env_values(cfg)}
+    if kitconfig.discord_enabled(cfg):
+        out[".env.bridge"] = bridge_env_values(cfg)
+    return out
 
 
 def check(repo, cfg, host_only=False, env_only=False):

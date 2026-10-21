@@ -439,12 +439,21 @@ def main(argv=None):
     ap.add_argument("step", choices=["discover", "intents", "clean", "webhook", "invite"])
     ap.add_argument("--apply", action="store_true")
     args = ap.parse_args(argv)
+    # Before any token is read or any call made: a kit that chose no Discord has no guild and no bots (KIT.md "With
+    # no Discord"). discover and intents run before kit.toml is complete, so this reads the choice as written.
+    sys.path.insert(0, str(sync.REPO / "kit"))
+    import kitconfig
+    try:
+        no_discord = not kitconfig.discord_choice(sync.KIT_TOML)
+    except kitconfig.ConfigError as e:
+        sys.exit(f"discord/bootstrap.py: {e}")
+    if no_discord:
+        sys.exit("discord/bootstrap.py: kit.toml says discord.enabled = false: this server has no Discord, so there "
+                 "is nothing to bootstrap (docs/kit/KIT.md \"With no Discord\")")
     if args.step == "discover":
         if args.apply:
             ap.error("discover is read-only: it prints the two kit.toml lines")
         env = sync.load_env()
-        sys.path.insert(0, str(sync.REPO / "kit"))
-        import kitconfig
         return discover(sync.Api(env["DISCORD_TOKEN"]), sync.Api(bridge_token()), kitconfig.path(sync.KIT_TOML))
     if args.step == "intents":
         return intents(sync.Api(bridge_token()), args.apply)

@@ -10,6 +10,8 @@ Where a value is used:
 - the systemd units, rendered from host/systemd/*.in
 - the compose keys in .env, and DISCORD_GUILD_ID in .env.bridge
 - pack/build.py (tailscale.server_address) and discord/sync.py (discord.guild_id, discord.bridge_bot_id)
+- discord.enabled = false (no Discord: HUMAN-STEPS step 23): MC_DISCORD="off" in host/kit.env, no .env.bridge key
+  (kit/render.py), the Discord phases skipped (kit/record.py skip), and sync/bootstrap refuse
 - pack.mode: which directory pack/build.py builds, and (custom) docker-compose.override.yml (kit/render.py)
 """
 import datetime
@@ -173,6 +175,9 @@ SCHEMA = {
         "device_id": (str, False, _match(r"[A-Za-z0-9]+", "a Tailscale device id")),
     },
     "discord": {
+        # The person's choice at the card (HUMAN-STEPS step 23). Absent or true: Discord, and every key below is
+        # required. false: no Discord at all, and this key is then the section's only one (validate).
+        "enabled": (bool, False, None),
         # A snowflake never starts with 0, so the example's all-zero placeholder is refused, not synced against.
         "guild_id": (str, True, _match(r"[1-9][0-9]{16,19}", SNOWFLAKE)),
         "bridge_bot_id": (str, True, _match(r"[1-9][0-9]{16,19}", SNOWFLAKE)),
@@ -243,11 +248,22 @@ def net_problems(net):
     return out
 
 
+def _discord_off(data):
+    table = data.get("discord")
+    return isinstance(table, dict) and table.get("enabled") is False
+
+
+def discord_enabled(cfg):
+    """A validated config's choice: True for Discord (the default: discord.enabled absent or true), False for none."""
+    return cfg["discord"].get("enabled", True) is not False
+
+
 def validate(data):
     """-> the config (the same dict). Raises ConfigError naming every problem at once."""
     errors = []
     if not isinstance(data, dict):
         raise ConfigError("kit.toml: not a table")
+    discord_off = _discord_off(data)
     for section in data:
         if section not in SCHEMA:
             errors.append(f"[{section}]: unknown section (known: {', '.join(SCHEMA)})")
@@ -264,6 +280,13 @@ def validate(data):
             if key not in keys:
                 errors.append(f"{section}.{key}: unknown key (known: {', '.join(keys)})")
         for key, (typ, required, check) in keys.items():
+            if discord_off and section == "discord" and key != "enabled":
+                # No Discord: a guild id or a bot id here would be config that silently does nothing (the way a
+                # static key under dhcp is refused), and a later switch back to Discord gets them from discover.
+                if key in table:
+                    errors.append(f"discord.{key}: set, but discord.enabled is false (no Discord: it would do "
+                                  "nothing; remove it, or remove enabled = false for Discord)")
+                continue
             if key not in table:
                 if required:
                     errors.append(f"{section}.{key}: missing")
@@ -290,6 +313,24 @@ def validate(data):
 
 def path(p=None):
     return Path(p or os.environ.get(PATH_ENV) or DEFAULT_PATH)
+
+
+def discord_choice(p=None):
+    """kit.toml's discord.enabled as written, for kit/record.py: True (Discord) or False (none). Not validated, since
+    kit.toml is filled in phase by phase and the record reads this before it is complete. No kit.toml yet, or no
+    `enabled` key, is Discord, the default (the stricter choice: every Discord step and phase is then required)."""
+    f = path(p)
+    try:
+        data = tomllib.loads(f.read_text())
+    except FileNotFoundError:
+        return True
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{f}: not valid TOML: {e}") from None
+    table = data.get("discord", {})
+    value = table.get("enabled", True) if isinstance(table, dict) else None
+    if not isinstance(value, bool):
+        raise ConfigError(f"{f}: discord.enabled must be true or false")
+    return value
 
 
 # ---- the pack the instance runs (pack.mode) -----------------------------------------------------------------

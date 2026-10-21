@@ -148,7 +148,7 @@ def test_the_pages_run_the_built_tools():
     found = {p for p, _ in invocations(TEXT)}
     for tool in ("kit/probe.sh", "kit/packages.sh", "kit/sudoers.sh", "kit/tailscale.py", "discord/bootstrap.py",
                  "discord/sync.py", "kit/render.py", "host/setup.sh", "host/check.sh", "mod/build.sh",
-                 "pack/build.py", "deploy/backup.sh", "deploy/world.sh", "kit/record.py"):
+                 "pack/build.py", "deploy/backup.sh", "deploy/world.sh", "kit/record.py", "kit/friends.py"):
         assert tool in found, tool
     steps = {(p, tuple(a)) for p, a in invocations(TEXT)}
     for sub in ("discover", "intents", "clean", "webhook", "invite"):
@@ -604,7 +604,9 @@ def test_human_steps_md_count_matches_its_mandatory_steps():
     steps = record.load_steps(STEPS_TEXT)
     one_time = {s for s in steps if s.isdigit()}
     assert len(one_time - {"3", "19", "20"}) == 20 and len(record.required_steps(steps)) == 19
-    assert "| **20** (19 if you already have Discord: step 9)" in STEPS_TEXT
+    assert len(record.required_steps(steps, record.discord_steps(STEPS_TEXT))) == 12  # no Discord: 9-16 drop
+    assert "| **20** (19 if you already have Discord: step 9). **12 with no Discord** (steps 9–16 drop)" in STEPS_TEXT
+    assert "**10** (most friends already have F1, and some have F2). **9 with no Discord** (no F2)" in STEPS_TEXT
     assert '"you do about 20 things once (19 if you already have Discord), each friend does 10; Claude does the rest."' in \
         " ".join(STEPS_TEXT.split())
     assert promise_problems(STEPS_TEXT) == []
@@ -616,7 +618,9 @@ def promise_problems(steps_text):
     para = " ".join(steps_text[steps_text.index("**The promise:**"):].split("\n\n")[0].split())
     want = ["the kit's first design had 17 one-time steps (1, 2 and 4–18, with step 9)",
             "make 19 with Discord sign-up and 18 without; the proof run measured the 18",
-            "Choosing the pack (23) came after the run: 20 with step 9, 19 without."]
+            "Choosing the pack (23) came after the run: 20 with step 9, 19 without.",
+            "steps 10–16 drop as well as 9: 19 − 7 = 12, and the promise is \"you do about 12 things once, each "
+            "friend does 9\""]
     problems = [f"missing: {w}" for w in want if w not in para]
     for stale in ("the 19th is", "grew by two", "left the count"):  # the second derivation, and the router's minus one
         if stale in para:
@@ -628,6 +632,7 @@ def promise_problems(steps_text):
     ("Choosing the pack (23) came after the run: 20 with step 9, 19 without.",
      "The 19th is choosing the pack (23), added after it."),
     ("Steps 19 and 20", "The router step (20) left the count. Steps 19 and 20"),
+    ("as well as 9: 19 − 7 = 12", "as well as 9: 13"),
 ])
 def test_the_promise_pin_catches_its_mutant(old, new):
     assert STEPS_TEXT.count(old) == 1, f"stale or ambiguous mutation pattern {old!r}"
@@ -653,6 +658,12 @@ def pack_card_problems(text, steps_text):
         problems.append("the card does not log step 23 or route to CUSTOM-PACK.md")
     if "23" not in record.required_steps(record.load_steps(steps_text)):
         problems.append("step 23 is not a required step, so finish would not refuse without it")
+    dq, yes, no = (card.find("Does your group want a Discord server"), card.find("1. **Discord.**"),
+                   card.find("2. **No Discord.**"))
+    if not (-1 < dq < yes < no):
+        problems.append("the card does not ask Discord or not, Discord first (the default)")
+    if "`enabled = false`" not in card[no:] or "nobody gets told" not in card[no:]:
+        problems.append("no Discord does not say what it writes in kit.toml, or that nobody is told of a failure")
     return problems
 
 
@@ -666,6 +677,9 @@ def test_p0_asks_for_the_pack_with_a_card_and_logs_step_23():
     ("1. **Vanilla Extended (Recommended).**", "1. **Vanilla Extended.**", "kit"),
     ('python3 kit/record.py human 23 --note', 'python3 kit/record.py status --note', "kit"),
     ("### 23. Choose the pack", "### 23. (Optional) Choose the pack", "steps"),
+    ("1. **Discord.**", "1. **Discord (Recommended).**\n2. **No Discord.**", "kit"),
+    ("2. **No Discord.**", "2. **Without it.**", "kit"),
+    ("but nobody gets told when\n   something fails", "and tells you when\n   something fails", "kit"),
 ])
 def test_the_pack_card_pin_catches_its_mutant(old, new, doc):
     text, steps_text = (TEXT.replace(old, new), STEPS_TEXT) if doc == "kit" else (TEXT, STEPS_TEXT.replace(old, new))
@@ -720,7 +734,7 @@ def record_problems(text):
     if 'is part of that step,\n   never an unplanned one: add `--note "captcha"` to that step\'s line' not in section("P1.", text):
         problems.append("P1 does not say where the Authorize captcha goes")
     if re.findall(r"python3 kit/record\.py human 23\b[^\n`]*", text) != [
-            'python3 kit/record.py human 23 --note "<vanilla-extended or custom>"']:
+            'python3 kit/record.py human 23 --note "<vanilla-extended or custom>, <discord or no-discord>"']:
         problems.append("step 23 is not logged once, at the card, with the option picked")
     if "Log step 23 once the pack is written" in text:
         problems.append("the custom path logs step 23 a second time")
@@ -738,7 +752,8 @@ def test_the_record_gets_captchas_as_notes_step_23_once_and_every_spike_gate():
 @pytest.mark.parametrize("old,new", [
     ('--unplanned "Discord terms-of-service tick"', '--unplanned "captcha on Authorize"'),
     ('never an unplanned one: add `--note "captcha"` to that step\'s line', "log it as an unplanned step"),
-    ('human 23 --note "<vanilla-extended or custom>"', 'human 23 --note "<vanilla-extended, or custom: its name>"'),
+    ('human 23 --note "<vanilla-extended or custom>, <discord or no-discord>"',
+     'human 23 --note "<vanilla-extended, or custom: its name>"'),
     ("Step 23 is already logged: do not log it again.", "Log step 23 once the pack is written, with its name."),
     ("sg docker -c 'bash pack/spike.sh --if-custom'", "sg docker -c 'bash pack/spike.sh'"),
 ])
@@ -766,7 +781,101 @@ def test_p6_runs_on_the_kit_profile_and_names_the_stop():
 
 
 def test_a_p0_refusal_offers_to_take_the_sudoers_drop_in_back_out():
-    """Step 7 installs the drop-in before P0 can refuse (seat review 2026-10-18: Ubuntu Server passes record.py and
+    """Step 7 installs the drop-in before P0 can refuse (review 2026-10-18: Ubuntu Server passes record.py and
     stops at P0's NetworkManager refusal), so a refusal leaves the laptop as it was only if Claude offers removal."""
     refuse = " ".join(section("P0. Probe").split("- **A REFUSE line**")[1].split("\n- ")[0].split())
     assert "sudo bash ~/minecraft-ai-host/kit/sudoers.sh remove" in refuse
+
+
+# ---- no Discord (operator ruling 2026-10-20): the pages say what changes, and the gates that differ are given -------
+
+def no_discord_problems(text, steps_text, readme):
+    problems = []
+    p7, p12 = section("P7.", text), section("P12.", text)
+    if ('gate P7 -- sh -c \'/usr/local/sbin/mc-alert "kit: the alert path works" 2>&1 | grep "alerts are off"\''
+            not in p7):
+        problems.append("P7 gives no alert gate for no Discord")
+    for block in fences(p7):  # each mode's alert gate is a block of its own: a rote run never trips on the other's
+        if "alert path works" in block and len(block.strip().splitlines()) != 1:
+            problems.append("a P7 alert gate shares its block with other commands")
+    if "python3 kit/record.py gate P12 -- python3 kit/friends.py --check" not in p12:
+        problems.append("P12 with no Discord does not gate on the friend message")
+    if "never read, cat or grep the file yourself" not in p12 or "the friend message (`~/minecraft-friend-message.txt`" \
+            not in section("The rules that bind you here", text):
+        problems.append("the friend message file is not named as a secret Claude never prints")
+    if "nobody is told when something fails" not in p12:
+        problems.append("P12's end of the run does not say alerts are off")
+    if "### R3. (No Discord) Add a friend to the server" not in steps_text \
+            or "docker compose exec minecraft rcon-cli whitelist add" not in steps_text:
+        problems.append("HUMAN-STEPS has no R3 (the person whitelists a friend)")
+    if "**A Discord account, only if you want Discord.**" not in readme:
+        problems.append("the README still requires a Discord account")
+    return problems
+
+
+def test_the_pages_carry_the_no_discord_path():
+    assert no_discord_problems(TEXT, STEPS_TEXT, README.read_text()) == []
+
+
+@pytest.mark.parametrize("old,new,doc", [
+    ('2>&1 | grep "alerts are off"', '2>&1 | grep "posted"', "kit"),
+    ('grep "posted (HTTP 204)"\'\n```\n', 'grep "posted (HTTP 204)"\'\npython3 kit/record.py end P7\n```\n', "kit"),
+    ("python3 kit/record.py gate P12 -- python3 kit/friends.py --check", "python3 kit/friends.py", "kit"),
+    ("never read, cat or grep the file yourself", "open it to check it", "kit"),
+    ("off: the server repairs itself, but nobody is told when something fails", "off.", "kit"),
+    ("### R3. (No Discord) Add a friend to the server", "### R3. Add a friend", "steps"),
+    ("**A Discord account, only if you want Discord.**", "**A Discord account.**", "readme"),
+])
+def test_the_no_discord_pin_catches_its_mutant(old, new, doc):
+    texts = {"kit": TEXT, "steps": STEPS_TEXT, "readme": README.read_text()}
+    assert texts[doc].count(old) == 1, f"stale or ambiguous mutation pattern {old!r}"
+    texts[doc] = texts[doc].replace(old, new)
+    assert no_discord_problems(texts["kit"], texts["steps"], texts["readme"])
+
+
+# ---- the owner-whitelisted gates (P11, P12) match the name exactly, never a substring of the reply -------------------
+
+WHITELIST_LIST = "docker compose exec minecraft rcon-cli whitelist list"
+SUBSTRING_GATE = ('sh -c \'docker compose exec minecraft rcon-cli whitelist list | grep -qiF "$(python3 -c "import '
+                  'tomllib; print(tomllib.load(open(\\"kit.toml\\", \\"rb\\"))[\\"server\\"][\\"owner_name\\"])")"\'')
+
+
+def whitelist_gate(phase, text=TEXT):
+    lines = [ln for ln in "\n".join(fences(section(f"{phase}.", text))).splitlines()
+             if f"kit/record.py gate {phase} -- " in ln and WHITELIST_LIST in ln]
+    assert len(lines) == 1, (phase, lines)
+    return lines[0].split(f"kit/record.py gate {phase} -- ", 1)[1]
+
+
+def gate_passes(gate, reply, owner, tmp_path):
+    """Run the gate's own text with the rcon reply stood in for docker, in a directory whose kit.toml names owner."""
+    import shlex
+    argv = shlex.split(gate)
+    assert argv[:2] == ["sh", "-c"] and argv[2].count(WHITELIST_LIST) == 1
+    script = argv[2].replace(WHITELIST_LIST, 'printf "%s\\n" "$WL"')
+    (tmp_path / "kit.toml").write_text("[server]\n" + (f'owner_name = "{owner}"\n' if owner else ""))
+    rc = subprocess.run(["sh", "-c", script], cwd=tmp_path, env={"WL": reply, "PATH": "/usr/bin:/bin"},
+                        capture_output=True).returncode
+    return rc == 0
+
+
+WHITELIST_CASES = [  # (rcon's reply, kit.toml owner_name, the gate passes)
+    ("There are 2 whitelisted player(s): alex, Steve", "Alex", True),
+    ("There are 1 whitelisted player(s): Alex", "Alex", True),
+    ("There are 1 whitelisted player(s): Alex123", "Alex", False),
+    ("There are no whitelisted players", "players", False),
+    ("There are 1 whitelisted player(s): Steve", "are", False),
+    ("There are 1 whitelisted player(s): Steve", None, False),
+]
+
+
+@pytest.mark.parametrize("phase", ["P11", "P12"])
+@pytest.mark.parametrize("reply,owner,want", WHITELIST_CASES)
+def test_the_whitelist_gate_matches_the_owner_exactly(phase, reply, owner, want, tmp_path):
+    assert gate_passes(whitelist_gate(phase), reply, owner, tmp_path) is want
+
+
+def test_the_whitelist_cases_catch_the_substring_gate(tmp_path):
+    """The gate both phases had before (grep -qiF over the whole reply) passes at least one case that must fail."""
+    wrong = [(r, o) for r, o, want in WHITELIST_CASES if not want and gate_passes(SUBSTRING_GATE, r, o, tmp_path)]
+    assert wrong

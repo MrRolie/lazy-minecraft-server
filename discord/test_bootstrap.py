@@ -863,3 +863,78 @@ def test_main_refuses_without_a_bridge_token_before_any_call(monkeypatch, tmp_pa
         with pytest.raises(SystemExit, match="DISCORD_BRIDGE_TOKEN|missing"):
             bootstrap.main([step])
     assert dc.calls == []
+
+
+# ---- no Discord (kit.toml discord.enabled = false): nothing to sync or bootstrap, refused before any call ----------
+
+def _no_discord_toml(tmp_path):
+    f = tmp_path / "kit.toml"
+    f.write_text(re.sub(r"(?ms)^\[discord\]\n.*?(?=^\[)", "[discord]\nenabled = false\n\n", EXAMPLE.read_text()))
+    return f
+
+
+def test_sync_refuses_a_kit_with_no_discord(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "KIT_TOML", _no_discord_toml(tmp_path))
+    with pytest.raises(SystemExit, match="no Discord"):
+        sync.load_kit_config()
+
+
+@pytest.mark.parametrize("step", ["discover", "intents", "clean", "webhook", "invite"])
+def test_bootstrap_refuses_a_kit_with_no_discord_before_reading_a_token(tmp_path, monkeypatch, step):
+    monkeypatch.setattr(sync, "KIT_TOML", _no_discord_toml(tmp_path))
+    monkeypatch.setattr(sync, "load_env", lambda: pytest.fail("read discord/.env with no Discord"))
+    monkeypatch.setattr(bootstrap, "bridge_token", lambda: pytest.fail("read .env.bridge with no Discord"))
+    with pytest.raises(SystemExit, match="no Discord"):
+        bootstrap.main([step])
+
+
+def test_the_no_discord_refusals_catch_their_mutants(tmp_path, monkeypatch):
+    """With either refusal taken out, the no-Discord kit reaches the token or the config (the tests above pass)."""
+    import importlib.util
+    monkeypatch.setattr(sync, "KIT_TOML", _no_discord_toml(tmp_path))
+    for name, guard in (("sync", "    if not kitconfig.discord_enabled(cfg):\n        sys.exit("),
+                        ("bootstrap", "    if no_discord:\n        sys.exit(")):
+        src = (sync.HERE / f"{name}.py").read_text()
+        assert src.count(guard) == 1, f"stale or ambiguous mutation pattern for {name}"
+        path = tmp_path / f"{name}_mut.py"
+        path.write_text(src.replace(guard, guard.replace("if not kitconfig.discord_enabled(cfg)", "if False")
+                                    .replace("if no_discord", "if False")))
+        spec = importlib.util.spec_from_file_location(f"{name}_mut", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if name == "sync":
+            mod.KIT_TOML = sync.KIT_TOML
+            mod.load_kit_config()  # the mutant hands a no-Discord config to the guild code
+        else:
+            reached = []
+            monkeypatch.setattr(sync, "load_env", lambda: reached.append("env") or sys_exit("stop"))
+            with pytest.raises(SystemExit, match="stop"):
+                mod.main(["discover"])
+            assert reached == ["env"]
+
+
+def sys_exit(msg):
+    raise SystemExit(msg)
+
+
+def test_sync_main_says_no_discord_before_asking_for_a_token(tmp_path, monkeypatch):
+    """The command line, not just load_kit_config: discord/.env on a no-Discord server holds only the share link, so
+    a main that read the token first would say "missing DISCORD_TOKEN" and send Claude back into the Discord path."""
+    import importlib.util
+    monkeypatch.setattr(sync, "KIT_TOML", _no_discord_toml(tmp_path))
+    monkeypatch.setattr(sync.sys, "argv", ["sync.py"])
+    monkeypatch.setattr(sync, "read_env", lambda: {"TAILSCALE_SHARE_LINK": "x"})
+    with pytest.raises(SystemExit, match="no Discord"):
+        sync.main()
+    guard = "    refuse_no_discord()  # before discord/.env"
+    src = (sync.HERE / "sync.py").read_text()
+    assert src.count(guard) == 1, "stale or ambiguous mutation pattern"
+    path = tmp_path / "sync_main_mut.py"
+    path.write_text(src.replace(guard, "    pass  # before discord/.env"))
+    spec = importlib.util.spec_from_file_location("sync_main_mut", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.KIT_TOML = sync.KIT_TOML
+    mod.read_env = lambda: {"TAILSCALE_SHARE_LINK": "x"}
+    with pytest.raises(SystemExit, match="missing DISCORD_TOKEN"):  # the mutant asks for the token first
+        mod.main()
