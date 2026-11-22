@@ -25,6 +25,11 @@ These six steps come before Claude can help. Every click is in [docs/kit/HUMAN-S
 
 From there Claude takes over, and tells you each time it needs you.
 
+**No screen at the laptop?** A headless setup is supported: install Ubuntu at the laptop (steps 1–3), turn on SSH
+there, and do the rest from your own computer, with Claude Code running on the laptop
+([HUMAN-STEPS.md](docs/kit/HUMAN-STEPS.md) steps 24–25). It has been rehearsed once, on a virtual machine, driven by
+hand, without Claude Code.
+
 ## Who it's for
 
 Part-time players who want a server for their group without spending their free evenings running it.
@@ -99,20 +104,27 @@ friends, open since 2026-10-02. It runs the version the kit was generalized from
 
 **The kit.** Its fresh setup is proven once, on the virtual machine above: every phase ran, Discord-to-game chat
 and `/whitelist` worked, and the test restart came back on its own. What that run found is fixed (in code with tests, or in
-the docs), except one open finding (below), and no run has gone through those fixes yet.
+the docs), except one open finding (below). Two later runs on virtual machines, both without Discord, ran on the
+fixed kit; the Discord and Tailscale fixes have not been run yet.
 
 **Not yet:**
 - No kit run on a real old laptop, so the Wi-Fi fallback, a fixed address, the battery charge cap and the BIOS
   power-on setting are untested.
-- The run stopped world pre-generation early.
+- The first run stopped world pre-generation early.
 - The custom-pack path: a friend ran it on 2026-10-20 and reported it went smoothly; its run record is pending. The
   defect it found, `#welcome` showing Vanilla Extended's text, is fixed in this snapshot; no run has gone through
   that fix yet.
-- The no-Discord path has not been run yet, on a laptop or on the virtual machine; its step count is counted from
-  the step list, not timed.
-- Game-to-Discord chat was not checked by eye in the run (Discord-to-game was).
-- One open finding: the Nether and End borders reverted once after a cancel and a restart. A gate caught it; it
-  has not been reproduced.
+- The no-Discord path ran once, on a throwaway virtual machine (2026-11-13), not on a laptop: Tailscale was untested,
+  world pre-generation was cut short, and every person's step was done by a stand-in, so nobody joined the game.
+  Its 12 steps are counted from the step list, not measured. What it found: [docs/kit/2026-11-13_no-discord-run-findings.md](docs/kit/2026-11-13_no-discord-run-findings.md).
+- The headless setup over SSH was rehearsed once, on a virtual machine (2026-11-14 to 15), with no Discord: key-only
+  SSH after setup, and the reconnect after a restart worked. Not yet run that way: Claude Code on the laptop itself (it
+  was not run in the rehearsal), the Windows connection line, a real home-network address, Tailscale, world pre-generation, Discord, or a real person at the
+  chair. The record: [docs/kit/2026-11-14_headless-rehearsal.md](docs/kit/2026-11-14_headless-rehearsal.md).
+- Game-to-Discord chat was not checked by eye in the first run (Discord-to-game was).
+- Two open findings. The Nether and End borders reverted once after a cancel and a restart; a gate caught it, and
+  it has not been reproduced. And after the no-Discord run's reboot, a health check failed on Tailscale's
+  auto-update setting (in that run's findings).
 
 ## How it stays private
 
@@ -163,7 +175,7 @@ the docs), except one open finding (below), and no run has gone through those fi
 uv run --with pytest --with discord.py==2.7.1 pytest
 ```
 
-On this snapshot (2026-10-20): 1825 pass and 54 skip. Every skip says why: it needs the original server's
+On this snapshot (2026-11-22): 1840 pass and 54 skip. Every skip says why: it needs the original server's
 private record, which is not in this copy. On a machine without Python 3.10, two more tests skip, also with their
 reason. Some tests read git history, so run them in a clone, not a bare download.
 
@@ -177,7 +189,7 @@ or a "codex review" mean those AI passes.
 
 ## This snapshot
 
-A public snapshot of a private repository, taken 2026-10-20 from commit `7f3806f`. Dropped, exactly as
+A public snapshot of a private repository, taken 2026-11-22 from commit `9b70d3a` (2026-11-15). Dropped, exactly as
 `kit/INSTANCE-PATHS` lists: the original server's instance record, its friends' Discord text and posts, and Mikael's
 working notes. A few lines elsewhere were edited where they pointed at those files or at private context, and this
 README and the LICENSE are new. The history stays private.
@@ -187,6 +199,20 @@ README and the LICENSE are new. The history stays private.
 It began as an AI "dungeon master" for weekend events on a pack of about 370 mods, retired on 2026-09-28 for the
 Vanilla Extended friend server (open since 2026-10-02). The kit was generalized from that server in October 2026.
 
+## Credits
+
+The default pack, Vanilla Extended, downloads every mod from Modrinth; this repository ships none of their files.
+Among them:
+
+- Stardust Labs: [Terralith](https://modrinth.com/mod/terralith), [Incendium](https://modrinth.com/mod/incendium),
+  [Nullscape](https://modrinth.com/mod/nullscape), [Structory](https://modrinth.com/mod/structory) and
+  [Structory: Towers](https://modrinth.com/mod/structory-towers).
+- Faboslav: [Friends & Foes](https://modrinth.com/mod/friends-and-foes) and
+  [Variants & Ventures](https://modrinth.com/mod/variants-and-ventures).
+
+Friends & Foes and Variants & Ventures are licensed CC BY-NC-ND: they allow only non-commercial servers. Every successful
+pack build prints the licence of each of its mods (`pack/lock.json`).
+
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The licence covers this repository's code, not the mods the pack downloads.

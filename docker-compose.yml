@@ -31,7 +31,7 @@ services:
       MODRINTH_LOADER: "fabric"
       # ve-commands (mod/README.md): not on Modrinth, so itzg copies it from ./extras on every start. A NEW
       # filename per build: itzg's copy treats a same-size file as up to date, and renaming drops the old copy.
-      MODS: "/extras/ve-commands-1.0.4.jar"
+      MODS: "/extras/ve-commands-1.0.5.jar"
       MEMORY: "${MEMORY:-8G}"  # kit.toml server.memory. Measured on asus-node (15 GiB): 10G left ~760 MiB free (JVM off-heap > estimate); 8G leaves ~5G headroom
       USE_AIKAR_FLAGS: "true"  # standard G1GC tuning for modded servers
       # An OOM'd JVM otherwise hangs forever and `restart` never fires (2 h dead, 2026-10-01): exit instead, and

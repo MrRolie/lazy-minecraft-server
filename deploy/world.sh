@@ -2,8 +2,8 @@
 # World rings: the launch borders and every chapter's border push, as one tool. Runs as the kit user in the
 # repo dir on the game host, against the running server, via in-container rcon-cli.
 #
-#   deploy/world.sh init                 one-time setup for a fresh world (idempotent): gamerules (no locator
-#                                        bar; players_sleeping_percentage 50), and
+#   deploy/world.sh init                 one-time setup for a fresh world (idempotent): gamerules (locator bar
+#                                        on, capped by ve-commands; players_sleeping_percentage 50), and
 #                                        mc_data/mcve/{out,in} (the mod <-> Discord bridge mailbox) owned
 #                                        by the kit user
 #   deploy/world.sh ring <dim> <radius>  set <dim>'s square border to radius (diameter 2r, centre 0,0) and
@@ -75,7 +75,7 @@ case "${1:-}" in
     done
     install -d -m 755 mc_data/mcve mc_data/mcve/out mc_data/mcve/in
     for d in mc_data/mcve/out mc_data/mcve/in; do echo "${d}: $(stat -c '%U:%G %a' "$d")"; done
-    rcon "gamerule minecraft:locator_bar false"  # keep "meet me at the big spire" navigation (design §7)
+    rcon "gamerule minecraft:locator_bar true"  # on; ve-commands caps each player's dots to nearby friends (design §7)
     rcon "gamerule minecraft:locator_bar"
     rcon "gamerule minecraft:players_sleeping_percentage 50"  # one of two sleepers skips the night (on-and-off group)
     rcon "gamerule minecraft:players_sleeping_percentage"
@@ -109,7 +109,7 @@ case "${1:-}" in
     fi
     # A running Chunky task keeps its OLD radius ("Task already started"), so the new ring would silently go
     # un-pre-generated: refuse until it finishes (rehearsal on a copy, 2026-10-01).
-    if rcon "chunky progress" | grep -q "Task running for ${id}\."; then
+    if rcon "chunky progress" | grep "Task running for ${id}\." >/dev/null; then
       echo "refusing: a Chunky task is still running for ${id}; wait for it (deploy/world.sh status)" >&2
       exit 1
     fi

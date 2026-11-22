@@ -23,6 +23,10 @@ pack/.cache/
 /docker-compose.override.yml
 /spike/
 .claude/worktrees/
+# lanes: one git worktree per piece of work, made fresh from main and removed at merge
+/.worktrees/
+# a checkout's own private pointers (addresses and the like), never in git
+/ESTATE.local.md
 # the maintenance flag (deploy/world.sh maintenance; host/bin/mc-heal stands down while it exists)
 /maintenance
 

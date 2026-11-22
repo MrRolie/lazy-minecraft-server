@@ -80,7 +80,7 @@ def test_kit_md_has_phases_p0_to_p12_in_order():
 
 def test_human_steps_md_has_the_planned_ids():
     steps = record.load_steps(record.STEPS_MD.read_text())
-    assert set(steps) == {str(n) for n in range(1, 24)} | {f"F{n}" for n in range(1, 11)} | {"R1", "R2", "R3"}
+    assert set(steps) == {str(n) for n in range(1, 26)} | {f"F{n}" for n in range(1, 11)} | {"R1", "R2", "R3"}
 
 
 def test_finish_refuses_a_real_run_that_never_logged_the_pack_choice(rd, repo):

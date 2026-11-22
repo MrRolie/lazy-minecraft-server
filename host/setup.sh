@@ -227,7 +227,7 @@ wired_static() {
   # Precheck, fail-closed: unless we already hold the address, prove nobody else does. No arping on the
   # host, so: ping, then look for a resolved lladdr in the neighbour table. The gateway is the positive
   # control: if it shows no lladdr, the probe itself is broken and proves nothing.
-  if ip -4 -o addr show dev "$dev" | grep -q " ${ip}/"; then
+  if ip -4 -o addr show dev "$dev" | grep " ${ip}/" >/dev/null; then
     log "${dev} already holds ${ip}; no conflict probe needed"
   else
     ping -c2 -W1 -I "$dev" "$WIRED_GW" >/dev/null 2>&1 || true
@@ -380,7 +380,7 @@ if [ -n "$WIRED" ] && nm_exists "$WIRED"; then
     wired_static
   elif [ "$(nmcli -g ipv4.method connection show "$WIRED")" != auto ]; then
     # dhcp: never change an address without the commit-confirm path; say how to go back instead.
-    abort_step "network: kit.toml net.mode is dhcp but '${WIRED}' has ipv4.method $(nmcli -g ipv4.method connection show "$WIRED"); nothing changed. Back to DHCP by hand (AGENTS.md 'Network' undo), or set net.mode = \"static\" with its address"
+    abort_step "network: kit.toml net.mode is dhcp but '${WIRED}' has ipv4.method $(nmcli -g ipv4.method connection show "$WIRED"); its address is left as it is. Back to DHCP by hand (AGENTS.md 'Network' undo), or set net.mode = \"static\" with its address"
   else
     log "unchanged ${WIRED}: ipv4 auto (DHCP; kit.toml net.mode=dhcp)"
   fi
@@ -579,10 +579,10 @@ install -d -m 755 /run/sshd
 if cmp -s "${HOST_DIR}/conf/sshd-10-mc-host.conf" "$sshd_conf"; then
   log "unchanged ${sshd_conf}"
 elif ! grep -Ev '^[[:space:]]*(#|$)' "$auth_keys" 2>/dev/null \
-  | grep -Eq '(^|[[:space:]])(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+)[[:space:]]+AAAA[0-9A-Za-z+/]'; then
+  | grep -E '(^|[[:space:]])(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+)[[:space:]]+AAAA[0-9A-Za-z+/]' >/dev/null; then
   warn "REFUSED: ${auth_keys} holds no public key; disabling passwords now could lock you out"
   next "SSH: add your key to ${auth_keys} (ssh-copy-id from the machine you administer it from), then re-run setup"
-elif ! sshd -T 2>/dev/null | grep -qx 'pubkeyauthentication yes'; then
+elif ! sshd -T 2>/dev/null | grep -x 'pubkeyauthentication yes' >/dev/null; then
   warn "REFUSED: sshd has PubkeyAuthentication off; disabling passwords would lock you out"
 else
   prev=""

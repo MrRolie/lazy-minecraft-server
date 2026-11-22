@@ -298,10 +298,55 @@ def test_jar_meta_returns_the_module_tree():
     assert (deep["environment"], deep["breaks"], deep["jars"]) == ("client", {"x": "<2"}, [])
 
 
+# ── 3b. fetch: every jar is checked against the lock's size and sha512 ───────
+
+def _pinned(tmp_path, data, **override):
+    import hashlib
+    src = tmp_path / "upstream.jar"
+    src.write_bytes(data)
+    entry = {"filename": "m.jar", "url": src.as_uri(), "sha1": "abc", "size": len(data),
+             "sha512": hashlib.sha512(data).hexdigest()}
+    entry.update(override)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    return entry, cache
+
+
+def test_fetch_downloads_checks_and_caches(tmp_path):
+    entry, cache = _pinned(tmp_path, b"jar bytes")
+    assert build.fetch(entry, cache) == b"jar bytes"
+    assert sorted(p.name for p in cache.iterdir()) == ["abc.jar"]
+
+
+def test_a_planted_wrong_sha512_fails_and_caches_nothing(tmp_path):
+    entry, cache = _pinned(tmp_path, b"jar bytes", sha512="0" * 128)
+    with pytest.raises(SystemExit, match="m.jar: sha512 mismatch"):
+        build.fetch(entry, cache)
+    assert list(cache.iterdir()) == []
+
+
+def test_a_wrong_size_fails_even_with_the_right_sha512(tmp_path):
+    entry, cache = _pinned(tmp_path, b"jar bytes")
+    entry["size"] += 1
+    with pytest.raises(SystemExit, match=r"m.jar: size 9, but the lock says 10"):
+        build.fetch(entry, cache)
+    assert list(cache.iterdir()) == []
+
+
+@pytest.mark.parametrize("cached", [b"jar bytez", b"jar", b""])
+def test_a_damaged_cached_jar_is_fetched_again(tmp_path, cached):
+    """Same size with other bytes, short, empty: the cache is checked on every build, never trusted by its name."""
+    entry, cache = _pinned(tmp_path, b"jar bytes")
+    (cache / "abc.jar").write_bytes(cached)
+    assert build.fetch(entry, cache) == b"jar bytes"
+    assert (cache / "abc.jar").read_bytes() == b"jar bytes"
+
+
 # ── 4. freeze ────────────────────────────────────────────────────────────────
 
 def _entry(vid):
-    return {"version_id": vid, "version_number": vid, "version_type": "release", "date": "2026-09-29"}
+    return {"version_id": vid, "version_number": vid, "version_type": "release", "date": "2026-09-29",
+            "license": "MIT"}
 
 
 def _refresh(mods, lock, update, newest="NEW"):
@@ -310,7 +355,10 @@ def _refresh(mods, lock, update, newest="NEW"):
     def fake_resolve(slug, pin, mc):
         calls.append(slug)
         return _entry(pin or newest)
-    build.refresh_lock(lock, mods, "26.1.2", update, resolve=fake_resolve)
+    def fake_licence(slug):
+        calls.append(f"licence {slug}")
+        return "LGPL-3.0-only"
+    build.refresh_lock(lock, mods, "26.1.2", update, resolve=fake_resolve, licence=fake_licence)
     return calls
 
 
@@ -338,6 +386,46 @@ def test_frozen_mod_is_still_locked_when_new():
 def test_no_update_touches_nothing():
     lock = {"mods": {"lootr": _entry("OLD")}}
     assert _refresh([{"slug": "lootr"}], lock, update=False) == []
+
+
+def test_a_lock_entry_without_a_licence_gets_its_projects_and_nothing_else_moves():
+    """The licence landing (2026-11-10): an entry locked before the field existed gains it from its Modrinth project,
+    with no re-resolve, so no version moves; an entry that has one is not looked up again."""
+    old = {k: v for k, v in _entry("OLD").items() if k != "license"}
+    lock = {"mods": {"lootr": dict(old), "terralith": _entry("OLD")}}
+    calls = _refresh([{"slug": "lootr"}, {"slug": "terralith", "freeze": True}], lock, update=False)
+    assert calls == ["licence lootr"]
+    assert lock["mods"]["lootr"] == {**old, "license": "LGPL-3.0-only"}
+    assert lock["mods"]["terralith"]["license"] == "MIT"
+
+
+def test_resolve_records_the_projects_licence(monkeypatch):
+    project = {"id": "P", "client_side": "optional", "server_side": "optional", "license": {"id": "MPL-2.0"}}
+    version = {"id": "V", "project_id": "P", "version_number": "1", "version_type": "release",
+               "date_published": "2026-10-16T00:00:00Z", "dependencies": [],
+               "files": [{"primary": True, "filename": "m.jar", "url": "u", "size": 1,
+                          "hashes": {"sha1": "s", "sha512": "x"}}]}
+    monkeypatch.setattr(build, "get", lambda path: [version] if "/version" in path else project)
+    assert build.resolve("m", None, "26.1.2")["license"] == "MPL-2.0"
+
+
+@pytest.mark.parametrize("project", [{}, {"license": None}, {"license": {"id": ""}}, {"license": {"id": "  "}}])
+def test_a_project_without_a_licence_id_stops_the_build(project):
+    with pytest.raises(SystemExit, match="m: Modrinth gives no licence id"):
+        build.licence_id(project, "m")
+
+
+def test_the_licence_table_lists_the_builds_mods_sorted():
+    locks = {"b": {"version_number": "2", "license": "MIT"}, "a": {"version_number": "1", "license": "ARR"},
+             "c": {"version_number": "3", "license": "X"}}
+    assert build.licence_table([{"slug": "b"}, {"slug": "a"}], locks).splitlines() == [
+        "| mod | version | licence |", "| --- | --- | --- |", "| a | 1 | ARR |", "| b | 2 | MIT |"]
+
+
+def test_every_locked_mod_has_a_licence():
+    lock = json.loads((build.HERE / "lock.json").read_text())
+    assert lock["mods"] and all(isinstance(e.get("license"), str) and e["license"].strip()
+                                for e in lock["mods"].values())
 
 
 def test_worldgen_mods_are_frozen_in_the_manifest():
@@ -710,7 +798,7 @@ def _fake_modrinth(monkeypatch, ids):
                      "date_published": "2026-10-16T00:00:00Z", "game_versions": ["26.1.2"], "loaders": ["fabric"],
                      "dependencies": [], "files": [{"primary": True, "filename": f"{slug}.jar", "url": f"u/{slug}",
                                                     "size": 1, "hashes": {"sha1": "s" + slug, "sha512": "x"}}]}]
-        return {"id": "P" + slug, "client_side": "optional", "server_side": "optional"}
+        return {"id": "P" + slug, "client_side": "optional", "server_side": "optional", "license": {"id": "MIT"}}
     monkeypatch.setattr(build, "get", get)
     monkeypatch.setattr(build, "fetch", lambda entry, cache: jars[entry["filename"][:-4]])
 
@@ -731,7 +819,9 @@ def test_main_builds_a_custom_pack_named_after_itself_from_its_own_dir(tmp_path,
     monkeypatch.setattr(sys, "argv", ["build.py", "--dir", str(src)])
     assert build.main() == 0
     out = root / "dist" / "sky-isles-1.2.0-ch1.mrpack"
-    assert "written dist/sky-isles-1.2.0-ch1.mrpack: 2 jars" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "written dist/sky-isles-1.2.0-ch1.mrpack: 2 jars" in printed
+    assert "| chunky | 1.0.0 | MIT |" in printed and "| fabric-api | 1.0.0 | MIT |" in printed
     with zipfile.ZipFile(out) as z:
         index = json.loads(z.read("modrinth.index.json"))
         dat = z.read("client-overrides/servers.dat")

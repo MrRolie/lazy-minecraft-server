@@ -195,7 +195,7 @@ apt_install "${DOCKER_PKGS[@]}"
 apt_install tailscale
 
 step "5. the kit user in the docker group"
-if id -nG "$KIT_USER" | tr ' ' '\n' | grep -qx docker; then
+if id -nG "$KIT_USER" | tr ' ' '\n' | grep -x docker >/dev/null; then
   log "unchanged: ${KIT_USER} is in the docker group"
 else
   usermod -aG docker "$KIT_USER"

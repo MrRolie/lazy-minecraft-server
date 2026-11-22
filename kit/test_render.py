@@ -685,7 +685,8 @@ def test_pause_when_empty_reaches_the_container_only_when_set_and_is_never_silen
 # test_the_fixture_reproduces_asus_nodes_servers_dat_byte_for_byte.
 
 ROLLOUT_CLAIM = ("Rendering `kit/fixtures/asus-node.toml` gives the systemd units, the `docker compose config` and "
-                 "the pack's `servers.dat` byte-identical to 06db28e; `host/kit.env` is the spine's plus one line, "
+                 "the pack's `servers.dat` byte-identical to 06db28e (the `MODS` jar aside, which each ve-commands "
+                 "release names); `host/kit.env` is the spine's plus one line, "
                  "`MC_CHARGE_CAP=\"none\"`, which is inert on asus-node")
 
 
@@ -698,7 +699,12 @@ def test_gate_compose_config_equals_06db28es(scratch):
     (scratch / ".env").write_text(SECRETS)
     (scratch / ".env.bridge").write_text(BRIDGE_SECRETS + f"DISCORD_GUILD_ID={gid}\n")
     compose = (scratch / "docker-compose.yml").read_bytes()
-    (scratch / "docker-compose.yml").write_bytes((GOLDEN / "docker-compose.yml").read_bytes())
+    # A ve-commands release changes compose's MODS jar and nothing else (mod/README.md "Release"), so 06db28e's
+    # compose is compared with the jar mod/RELEASE.sha256 pins today in place of the 1.0.4 it named.
+    golden = (GOLDEN / "docker-compose.yml").read_bytes()
+    assert golden.count(b'MODS: "/extras/ve-commands-1.0.4.jar"') == 1
+    pinned = (REPO / "mod" / "RELEASE.sha256").read_text().split()[1]
+    (scratch / "docker-compose.yml").write_bytes(golden.replace(b"ve-commands-1.0.4.jar", pinned.encode()))
     at_06db28e = _compose_config(scratch)
     (scratch / "docker-compose.yml").write_bytes(compose)
     assert render.main(["--repo", str(scratch)]) == 0
@@ -722,10 +728,15 @@ def test_the_fixture_kit_env_is_the_spines_plus_the_inert_charge_cap(tmp_path):
 def test_the_goldens_are_06db28es_bytes(golden, at):
     """Where the history is here, the goldens are checked against it (a shallow clone without 06db28e skips, and says
     so: the goldens then stand on this test's last run)."""
-    r = subprocess.run(["git", "cat-file", "-e", "06db28e^{commit}"], cwd=REPO, capture_output=True)
-    if r.returncode != 0:
-        pytest.skip("06db28e is not in this clone's history")
-    want = subprocess.run(["git", "show", f"06db28e:{at}"], cwd=REPO, capture_output=True, check=True).stdout
+    # The same commit has three names: 06db28e before the fold, 22c5d56 while this repo was folded into game-studio
+    # (servers/minecraft/, 2026-11-09 to 2026-11-10, its paths under that prefix) and 2f43172 since the split back
+    # (the same tree). --show-prefix is "" in a standalone clone.
+    prefix = subprocess.run(["git", "rev-parse", "--show-prefix"], cwd=REPO, capture_output=True, text=True).stdout.strip()
+    sha = next((c for c in ("06db28e", "22c5d56", "2f43172") if subprocess.run(
+        ["git", "cat-file", "-e", f"{c}:{prefix}{at}"], cwd=REPO, capture_output=True).returncode == 0), None)
+    if sha is None:
+        pytest.skip("06db28e (22c5d56 in the fold, 2f43172 since the split back) is not in this clone's history")
+    want = subprocess.run(["git", "show", f"{sha}:{prefix}{at}"], cwd=REPO, capture_output=True, check=True).stdout
     assert (GOLDEN / golden).read_bytes() == want
 
 

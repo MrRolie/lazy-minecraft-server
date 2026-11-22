@@ -404,7 +404,7 @@ def test_the_retro_pin_catches_its_mutant(old, new):
 def test_every_optional_or_conditional_step_is_logged_somewhere_in_kit_md():
     steps = record.load_steps(STEPS_TEXT)
     maybe = [s for s, title in steps.items() if s.isdigit() and title.startswith(("(Optional)", "(Conditional)"))]
-    assert sorted(maybe, key=int) == ["3", "19", "20"]  # the list this test guards; a new one joins it
+    assert sorted(maybe, key=int) == ["3", "19", "20", "24", "25"]  # the list this test guards; a new one joins it
     missing = [s for s in maybe if not re.search(rf"python3 kit/record\.py human {s}\b", TEXT)
                and not re.search(rf"Log step {s}\b", TEXT)]
     assert missing == []
@@ -599,11 +599,11 @@ def test_the_ubuntu_floor_pin_catches_its_mutant(doc, old, new):
 
 
 def test_human_steps_md_count_matches_its_mandatory_steps():
-    """The count table's 20 = the one-time ids minus the optional and conditional ones (3, 19, 20); 19 without
+    """The count table's 20 = the one-time ids minus the optional and conditional ones (3, 19, 20, 24, 25); 19 without
     step 9 (most people have Discord). A step added or removed without updating the count fails here."""
     steps = record.load_steps(STEPS_TEXT)
     one_time = {s for s in steps if s.isdigit()}
-    assert len(one_time - {"3", "19", "20"}) == 20 and len(record.required_steps(steps)) == 19
+    assert len(one_time - {"3", "19", "20", "24", "25"}) == 20 and len(record.required_steps(steps)) == 19
     assert len(record.required_steps(steps, record.discord_steps(STEPS_TEXT))) == 12  # no Discord: 9-16 drop
     assert "| **20** (19 if you already have Discord: step 9). **12 with no Discord** (steps 9–16 drop)" in STEPS_TEXT
     assert "**10** (most friends already have F1, and some have F2). **9 with no Discord** (no F2)" in STEPS_TEXT
@@ -787,7 +787,7 @@ def test_a_p0_refusal_offers_to_take_the_sudoers_drop_in_back_out():
     assert "sudo bash ~/minecraft-ai-host/kit/sudoers.sh remove" in refuse
 
 
-# ---- no Discord (operator ruling 2026-10-20): the pages say what changes, and the gates that differ are given -------
+# ---- no Discord (design decision, 2026-10-20): the pages say what changes, and the gates that differ are given -------
 
 def no_discord_problems(text, steps_text, readme):
     problems = []

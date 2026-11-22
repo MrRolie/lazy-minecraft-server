@@ -3,7 +3,7 @@
 	"id": "ve-commands",
 	"version": "${version}",
 	"name": "VE Commands",
-	"description": "Vanilla Extended friend server: /discovery and /coords, plus the mcve file bridge to Discord (mod/CONTRACT.md).",
+	"description": "Vanilla Extended friend server: /discovery, /coords, /hide and /here, the locator bar capped to nearby friends, plus the mcve file bridge to Discord (mod/CONTRACT.md).",
 	"authors": ["mm-mike"],
 	"license": "All-Rights-Reserved",
 	"environment": "server",

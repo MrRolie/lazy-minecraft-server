@@ -8,8 +8,9 @@ person, and what to tell them. The person's side is `docs/kit/HUMAN-STEPS.md`.
 `20261016T030748Z`) went through every phase; what it found, and what fixed each finding, is `docs/kit/2026-10-16_proof-run-findings.md`.
 The fixes from that run (the pack card after P0, the token tool, P6's `clean`, P9's `world.sh done`, P11's
 look-back) are built and tested against fakes, but no run has gone through them yet: they are **[verify live]**
-until the next one. So is the whole **no-Discord path** (operator ruling 2026-10-20, "With no Discord" below):
-built and tested against fakes, never run. When a step here proves wrong, fix this page in the same change.
+until the next one. The **no-Discord path** (design decision, 2026-10-20, "With no Discord" below) ran live once,
+P0–P12 on a throwaway 11 GB VM with accepted failures: P3 untested, the P9 rings cut short (2026-11-13, `docs/kit/2026-11-13_no-discord-run-findings.md`).
+When a step here proves wrong, fix this page in the same change.
 
 ## The rules that bind you here
 
@@ -83,7 +84,7 @@ Every phase below runs a built, tested tool. What is still open, and what you do
 |---|---|
 | A uid or gid other than 1000 (the bridge image and itzg write the mailbox as 1000) | `kit/probe.sh` refuses; the kit does not run there |
 | A maintenance window other than 04:00 (`schedule.maint_start`) | `kit.toml` refuses it; keep 04:00 |
-| SSH on a one-machine install: Ubuntu Desktop has no SSH server and the person has no key on it | `setup.sh` step 8 refuses key-only SSH; P7 asks, and with no SSH wanted the gate is `check.sh --no-ssh` (below) |
+| SSH on a one-machine install: Ubuntu Desktop has no SSH server and the person has no key on it (except a headless setup, steps 24–25: P7) | `setup.sh` step 8 refuses key-only SSH; P7 asks, and with no SSH wanted the gate is `check.sh --no-ssh` (below) |
 | Rotating the share link after launch | HUMAN-STEPS R1, in the Tailscale console (the token was used once) |
 | An off-host backup | none yet: backups are on the laptop's own disk |
 | A pack other than Vanilla Extended (design decision, 2026-10-14) | On the person's choice at the pack card (P0): `docs/kit/CUSTOM-PACK.md`. Modrinth only, Fabric 26.1.2 / loader 0.19.5, sized to the RAM. Claim only "passes the build/lint gates and booted once in a recorded test; not the path the kit's proof run tested" |
@@ -91,8 +92,8 @@ Every phase below runs a built, tested tool. What is still open, and what you do
 
 ## With no Discord
 
-The person chooses at the card after P0 (human step 23, below): Discord for their group, or no Discord (operator
-ruling 2026-10-20: Discord was the longest part of the first friend's run, and not every group wants it). The
+The person chooses at the card after P0 (human step 23, below): Discord for their group, or no Discord (design
+decision, 2026-10-20: Discord was the longest part of the first friend's run, and not every group wants it). The
 choice lives in `kit.toml` as `discord.enabled = false`, the `[discord]` section's only line. Absent, it is Discord,
 the default, and everything on this page runs as it always has. With no Discord:
 
@@ -110,7 +111,7 @@ kit step yet: say so if the person asks.
 
 ## Before P0: get the repo onto the laptop
 
-The person has done human steps 1–6 (Ubuntu; `curl`, `git` and Claude Code installed; logged in) and asked you to
+The person has done human steps 1–6 (and 24–25 if headless) (Ubuntu; `curl`, `git` and Claude Code installed; logged in) and asked you to
 set up the server.
 
 1. `git clone https://github.com/MrRolie/lazy-minecraft-server ~/minecraft-ai-host`. Everything below runs from
@@ -128,10 +129,14 @@ set up the server.
 
    `--unplanned` is only for a step the list lacks (`python3 kit/record.py human --unplanned "<what>"`), never for
    the time a listed step took: an unplanned step adds 1 to N.
-4. Step 3 is optional (power on after a power cut, a BIOS setting). Ask whether they did it: if yes,
+4. **Headless:** ask whether they are at the laptop's screen or connected over SSH from another computer
+   (HUMAN-STEPS "from your other computer"). Over SSH, they did steps 24 and 25 before step 5: log both with
+   `--retro` (`python3 kit/record.py human 24 --retro && python3 kit/record.py human 25 --retro`). From here on,
+   "second terminal" means a second SSH window, and P7's SSH answer is already yes (below).
+5. Step 3 is optional (power on after a power cut, a BIOS setting). Ask whether they did it: if yes,
    `python3 kit/record.py human 3 --retro`; if not, tell them it is worth doing the next time they are in the BIOS,
    and go on. The kit does not need it.
-5. Step 7, the sudo permission: give them this command for the **second terminal** (the path is the checkout's):
+6. Step 7, the sudo permission: give them this command for the **second terminal** (the path is the checkout's):
 
    ```sh
    sudo bash ~/minecraft-ai-host/kit/sudoers.sh install
@@ -467,6 +472,13 @@ python3 kit/record.py end P6
 Tell them: "Now I set the laptop up to run unattended: never sleep, survive network trouble, update itself at
 night, back up the world. A few minutes."
 
+**Headless (steps 24–25), before the first `setup.sh`:** step 8 turns password logins off, so prove the person's key
+works first. Their own connection must show in the log as a key login:
+`sudo journalctl -u ssh.service | grep -c "Accepted publickey for $(whoami)"` must be at least 1. If it is 0, stop: have
+them redo step 25's middle line and reconnect, and check again. With `net.mode = "static"`, tell them the new address
+(`net.static_addr`) before the run: their SSH window drops when it applies, and they reconnect there and run
+`tmux new -A -s kit`.
+
 ```sh
 python3 kit/record.py begin P7
 sudo bash host/setup.sh                 # then read its "next steps" list
@@ -475,7 +487,7 @@ python3 kit/record.py gate P7 -- sudo bash host/check.sh --no-ssh     # without 
 python3 kit/record.py gate P7 -- sh -c 'systemd-analyze verify /etc/systemd/system/mc-*.service /etc/systemd/system/mc-*.timer'
 ```
 
-Then the alert gate, which depends on the choice at step 23. **With Discord**, a test alert reaches `#alerts`:
+Then the alert gate, which depends on the choice at step 23. **With Discord**, a test alert reaches `#ops-log`:
 
 ```sh
 python3 kit/record.py gate P7 -- sh -c '/usr/local/sbin/mc-alert "kit: the alert path works" 2>&1 | grep "posted (HTTP 204)"'
@@ -503,7 +515,8 @@ python3 kit/record.py end P7
 - `setup.sh` and `check.sh` refuse unless the hostname is `kit.toml` `host.name` and the checkout is `host.repo`.
 - **SSH, asked before the `check.sh` gate:** `setup.sh` step 8 refuses key-only SSH while
   `~/.ssh/authorized_keys` is empty (it could lock the person out), and Ubuntu Desktop has no SSH server. Ask
-  whether they want to reach the server from another computer. If no (the usual answer, and the proof run's), the
+  whether they want to reach the server from another computer; a headless setup (steps 24–25) already said yes, and
+  its key is in place, so go straight to the plain `check.sh` gate. If no (the usual answer, and the proof run's), the
   gate is `sudo bash host/check.sh --no-ssh`: it skips the key-only lines and FAILs if an SSH server is running, so
   it passes with no `--accept`, and any FAIL it shows is a real failure. If yes,
   `sudo apt-get install -y openssh-server`, add their key, re-run setup, and gate `sudo bash host/check.sh` (no
@@ -549,6 +562,11 @@ python3 kit/record.py gate P9 -- sh -c 'tar -tzf "$(ls -t backups/world-*.tar.gz
 python3 kit/record.py gate P9 -- sg docker -c 'bash deploy/world.sh init'
 ```
 
+`world.sh init` turns the locator bar on, and ve-commands caps each player's dots to friends within 200 blocks and
+gives every player `/hide` (their own dot off the bar) and `/here` (their coordinates in game chat). It is
+Vanilla Extended's ruling (`mod/README.md` "Locator bar"); the kit has no setting for it yet. Tell the owner, so
+they can tell their friends.
+
 Pre-generation (AGENTS.md "Hard-won server facts": a paused server never unloads chunks, so it OOMs):
 
 1. Pausing off: set `server.pause_when_empty_seconds = -1` in `kit.toml` and `python3 kit/render.py`. A changed
@@ -584,7 +602,10 @@ python3 kit/record.py end P9
 `world.sh done` passes only when Chunky has finished all three rings at those radii. It reads Chunky's own task
 files and log lines, and only those written since `ring` started each ring on this world (`ring` leaves a stamp in
 the world's folder), so a ring cut short fails it, and says which one and how far it got. If the person chooses to stop early (a
-test machine), that failure is theirs to accept: `end P9`, then `end P9 --accept "<why>"`.
+test machine), that failure is theirs to accept: `end P9`, then `end P9 --accept "<why>"`. To stop a running ring,
+send `chunky cancel` and then `chunky confirm` (two rcon calls; `cancel` alone only asks for the confirm, and the
+ring would resume at the next start). Then run `world.sh status` until it shows no task, and restore pausing as in
+step 3.
 
 The border gate is there for a reason too. On the proof run the Nether and End borders had gone back to the
 default after a restart, and that gate is what caught it (`docs/kit/2026-10-16_proof-run-findings.md` #10). It
@@ -609,14 +630,16 @@ that one is expected. With no Discord, `mc-bridge-up` sees `MC_DISCORD="off"` in
 nothing but one journal line, and the boot is the same otherwise.
 
 Tell them: "Last check of this part: I'll restart the laptop to prove the server comes back by itself. Claude
-closes too. When the laptop is back, log in, open a terminal, and run `claude --continue`." Then, only if both
+closes too. When the laptop is back, log in, open a terminal, and run `claude --continue`." Headless, say instead:
+"your SSH window will drop; in a couple of minutes connect again at <the address>, run `tmux new -A -s kit`, then
+`claude --continue`." Give the address: step 24's, or `net.static_addr` with a fixed address. Then, only if both
 gates passed, `sudo systemctl reboot`. When you are back:
 
 ```sh
 python3 kit/record.py human 22     # they logged back in and ran claude --continue
 python3 kit/record.py gate P10 -- sh -c 'boot=$(date -d "$(uptime -s)" +%s); for i in $(seq 60); do docker compose logs --since "$boot" minecraft | grep -q "Done (" && exit 0; sleep 5; done; exit 1'
 python3 kit/record.py gate P10 -- docker compose exec minecraft rcon-cli list
-python3 kit/record.py gate P10 -- sudo bash host/check.sh --no-ssh     # the same check.sh gate as P7's
+python3 kit/record.py gate P10 -- sudo bash host/check.sh --no-ssh     # the same check.sh gate as P7's: without --no-ssh when they want SSH or are headless
 python3 kit/record.py gate P10 -- sh -c 'systemctl list-timers mc-backup.timer | grep -q mc-backup.timer'
 python3 kit/record.py end P10
 ```
@@ -668,7 +691,8 @@ Keep the `&&` in the second gate: `--since ""` would read the whole log.
 
 With Discord, the steps and gates right below. **No Discord:** "P12 with no Discord" after them, instead.
 
-1. Set `server.open_date` in `kit.toml` to today, `python3 kit/render.py`, and sync: `python3 discord/sync.py`
+1. Set `server.open_date` in `kit.toml` to today, unquoted (a TOML date: `open_date = 2026-11-15`, never
+   `"2026-11-15"`, which render refuses), then `python3 kit/render.py`, and sync: `python3 discord/sync.py`
    (dry run: the `#welcome` status line becomes "open"), then `python3 discord/sync.py --apply`.
 2. The friend invite: `python3 discord/bootstrap.py invite --apply`. It refuses while `@everyone` can still create
    invites (the lock is P6's), makes a 7-day invite into `#welcome`, checks it with a GET, and prints the
@@ -687,8 +711,8 @@ python3 kit/record.py finish
 
 ### P12 with no Discord
 
-1. `python3 kit/record.py begin P12`. Set `server.open_date` in `kit.toml` to today, then `python3 kit/render.py`.
-   There is nothing to sync.
+1. `python3 kit/record.py begin P12`. Set `server.open_date` in `kit.toml` to today, unquoted as
+   above, then `python3 kit/render.py`. There is nothing to sync.
 2. Put the person on the whitelist (with Discord, P11's `/whitelist` does it). Their name is `server.owner_name`:
    `docker compose exec minecraft rcon-cli whitelist add <their Minecraft name>`.
 3. The friend message: `python3 kit/friends.py`. It writes one ready-to-paste message for the person's friends to
@@ -700,7 +724,10 @@ python3 kit/record.py finish
    the Files app, Home), copy everything between the two dashed lines, and send it to your friends however you
    usually talk, with the pack file it names attached. The link in it is private: send it to friends only." If they
    want it opened for them, `xdg-open ~/minecraft-friend-message.txt` opens it in their text editor without
-   printing it here.
+   printing it here. **Headless:** there is no screen to open it on. Give them two commands for a terminal on their
+   own computer (not the SSH window), which copy both files there:
+   `scp <user>@<address>:minecraft-friend-message.txt .` and `scp <user>@<address>:minecraft-ai-host/dist/<file>.mrpack .`
+   (the `.mrpack` name from the file's top lines, which `python3 pack/build.py --which` also prints).
 5. The sudoers drop-in **stays**, as with Discord (step 3 above).
 
 ```sh

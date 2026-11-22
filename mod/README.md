@@ -5,14 +5,16 @@ Fabric API 0.155.3+26.1.2, Java 25) that:
 
 - gives every player `/discovery <text>` (1–200 chars) and `/coords <name>` (1–60 chars), with a 10 s cooldown
   per player per command
+- caps the vanilla locator bar to friends within 200 blocks and gives every player `/hide` and `/here` ("Locator
+  bar" below)
 - writes game events to `<server dir>/mcve/out/events.jsonl` and acts on `<server dir>/mcve/in/inbox.jsonl`
 
 The bridge and the mod talk **only** through those files. `out/` is the mod's and `in/` is the bridge's; the
 bridge mounts `out/` read-only. The contract is **`mod/CONTRACT.md`**, its one home.
 Change it there first, then change both sides.
 
-The mod is `"environment": "server"`. Vanilla clients need nothing. Both commands use only the vanilla brigadier
-greedy-string argument, so they reach clients through the server's normal command tree.
+The mod is `"environment": "server"`. Vanilla clients need nothing. The commands use only the vanilla brigadier
+greedy-string argument (or none), so they reach clients through the server's normal command tree.
 
 ## Build
 
@@ -26,7 +28,7 @@ docker run --rm -u "$(id -u):$(id -g)" \
   -v "$HOME/.cache/ve-commands-gradle:/gradle-home" \
   -v "$PWD/mod:/src" -w /src/ve-commands \
   eclipse-temurin:25-jdk ./gradlew --no-daemon build
-# -> mod/ve-commands/build/libs/ve-commands-<version>.jar  (about 34 KB); `build` also runs the unit tests,
+# -> mod/ve-commands/build/libs/ve-commands-<version>.jar  (about 50 KB); `build` also runs the unit tests,
 #    which read mod/contract-examples/ (hence the whole mod/ mount)
 ```
 
@@ -128,9 +130,61 @@ jar is its git commit plus `mod/RELEASE.sha256`.
 - **Rotation override (testing only):** `-Dvecommands.rotateBytes=<n>` replaces the 5 MiB threshold. With itzg,
   set `JVM_DD_OPTS=vecommands.rotateBytes:<n>`.
 
+## Locator bar (1.0.5; option a2, ruled 2026-11-03)
+
+The game rule `locator_bar` is on (`deploy/world.sh init`). Vanilla shows a friend's dot while the distance is under
+min(their `minecraft:waypoint_transmit_range`, your `minecraft:waypoint_receive_range`); both default to 6.0E7 on a
+player (MC 26.1.2 bytecode: `Attributes`, `Player.createAttributes`, `WaypointTransmitter.doesSourceIgnoreReceiver`).
+The code is `Locator` (the rules, MC-free) and `LocatorBar` (on a ServerPlayer).
+
+- **The cap:** on every join, and on the new player after every respawn (death or End exit; Fabric
+  `ServerPlayerEvents.AFTER_RESPAWN`), a transient `ADD_VALUE` modifier `ve-commands:receive_cap` brings receive
+  range down to **200 blocks** (`Locator.RECEIVE_RANGE_BLOCKS`, with its reason). It never raises a lower base.
+  `-Dvecommands.locatorRange=<blocks>` (itzg: `JVM_DD_OPTS=vecommands.locatorRange:<blocks>`) overrides it for a
+  spike; a value outside (0, 6.0E7] is ignored. The server log says the range at start. The cap is an offset on
+  the base value, worked out at join or respawn, not a clamp on the final value: another modifier on receive range
+  (vanilla and the pack add none today) would add to it, and an admin's `/attribute … base set` takes effect at that
+  player's next join or respawn.
+- **`/hide`:** toggles the entity tag `ve_hidden` and a transient ×0 modifier `ve-commands:hide` on your own transmit
+  range (the shape of vanilla's crouch modifier). It never touches receive, so you still see friends. Vanilla saves
+  tags in playerdata and copies them on every respawn, so `/hide` holds through deaths, relogs and restarts until
+  you type it again; the join and respawn hook re-applies it from the tag. It hides your dot, not where you are:
+  `/here` still posts your coordinates, and the `/hide` reply says so.
+- **`/here`:** one chat line, `📍 <name> is at <x> <y> <z> in the Overworld`, sent to each player online (you
+  included), with a 10 s cooldown. Sent player by player, never broadcast, so it stays in the game: Fabric's
+  `GAME_MESSAGE` (the bridge's `game` event) fires on `broadcastSystemMessage` only. It emits no event.
+- **Players, never places:** the code touches only a player's own two waypoint attributes. It never spawns or
+  tags another entity, so no place can transmit a dot (`LocatorWiringTest` fails if it ever does).
+- **Nothing in playerdata but the tag:** `AttributeInstance.pack()` saves the base value and permanent modifiers
+  only, and both modifiers here are transient. A failure to apply is logged (`locator cap not applied to …`) and
+  never breaks the join.
+- **Known window:** a joining or respawning player is placed with vanilla's range first; the cap lands on the next
+  tick (the attribute update re-adds the player to the level's waypoint manager, which drops the far
+  connections). A far dot can show for about one tick.
+- **Spectators see every dot:** vanilla's range check starts by never ignoring a spectator receiver
+  (`WaypointTransmitter.doesSourceIgnoreReceiver`), so an op in spectator mode sees every transmitting player at
+  any distance. A hidden player transmits nothing (transmit range 0 stops vanilla tracking it), so stays off even
+  that bar.
+- **Dimensions:** waypoints are per level (`ServerLevel.getWaypointManager`), so a friend in another dimension
+  never shows. A portal keeps the same ServerPlayer (`ServerPlayer.teleport`), so the modifiers ride along.
+- **Taking it out:** the release is one commit (code, tests, pin, `MODS`, this section), and the cap leaves
+  nothing in playerdata to reset. In order:
+  1. Tell the friends first (`#announcements`): anyone who used `/hide` shows on the bar again at their next join.
+  2. One commit: `git revert` the release commit (its SHA is in the instance record, under "Taking the cap out" — a private record, not in this copy;
+     deploy per AGENTS.md "Updating a running server"). It restores the 1.0.4 code, pin and `MODS` line and removes this
+     section; the 1.0.4 jar is kept in `extras/`), plus the docs outside `mod/` that describe the cap: the
+     `deploy/world.sh` init comment on the `locator_bar` line, AGENTS.md's `mod/` row, design §7,
+     the original server's design note (private, not in this copy), the
+     `docs/kit/KIT.md` P9 note, and the instance record's deployed-version line. Decide the game rule in the same
+     commit: the bar on uncapped (option a1), or `gamerule minecraft:locator_bar false` on the live world and
+     `false` in `world.sh init` again.
+  3. "Deploy on the game host". Every player is uncapped at their next join. `/hide` users keep an inert
+     `ve_hidden` tag; to clear it for players online, `rcon-cli "tag @a remove ve_hidden"`.
+
 ## Tests
 
-`./gradlew build` runs the MC-free unit tests (JUnit 5):
+`./gradlew build` runs the unit tests (JUnit 5). All are MC-free but `LocatorBarTest`, which bootstraps Minecraft's
+registries (no server, no world):
 
 | Test | Covers |
 |---|---|
@@ -145,6 +199,9 @@ jar is its git commit plus `mod/RELEASE.sha256`.
 | `NoFollowRaceTest` | A link swapped in after the lstat check passed (the inbox, the offset, the offset tmp, `events.jsonl`) is still refused by the `O_NOFOLLOW` open |
 | `McveDirsTest` | A symlinked `mcve/` is refused before `out/` and `in/` are created through it |
 | `JobsTest` | A blocked inbox job never stops the status beat (they are separate threads), and VeCommands' call site (pinned from its source) passes the beat as its own job |
+| `LocatorTest` | The cap is exactly the range on a vanilla player and never raises a lower base; it is in the a2 band; a respawn (a new player with the base values and tags only) gets the cap and `/hide` back; `/hide` flips transmit and the tag and makes no receive call; a tagged player rejoins hidden; the spike override takes only a range in (0, 6.0E7]; the chat lines |
+| `LocatorBarTest` | `LocatorBar.Waypoints` on Minecraft's own `AttributeInstance` (bootstrapped, no server): the cap makes receive exactly 200 and transmit untouched, a lower base is left alone and a stale cap removed, `/hide` makes transmit 0 (with any base, alongside sneaking) and back with the modifier and the tag gone, a respawned player gets both back, `pack()` saves no modifier; and on the real command tree a friend without op can run `/hide`, `/here`, `/coords` and `/discovery` |
+| `LocatorWiringTest` | Pinned from source: the cap goes on at join and on the respawned (new) player, nowhere else; `/hide` touches transmit only and the cap receive only; `LocatorBar.of` hands `Waypoints` the player's own two ranges and tag calls (the one line that needs a ServerPlayer, pinned whole); no `setBaseValue` or permanent modifier anywhere; no entity spawning or entity types anywhere, and only `LocatorBar` touches transmit; `/here` sends to each player online, never broadcasts, emits nothing, has its cooldown |
 | `SymlinkTest` | Planted links for `events.jsonl`, `events.jsonl.1`, `inbox.offset(.tmp)`, `inbox.jsonl`, and linked `in/` and `out/`, plus a fifo inbox (with a 5 s bound, so a regression fails rather than hangs): all refused, the world stand-ins left byte-identical |
 
 `mod/test_check_extras.py` (pytest) covers the deploy check and its `host/check.sh` wiring, which it runs. The spike evidence is in the private repository's commit

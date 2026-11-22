@@ -3599,3 +3599,27 @@ def test_mc_alert_with_discord_still_posts(monkeypatch, capsys):
     monkeypatch.setattr(al, "post", lambda url, content: posted.append(content) or 204)
     assert al.main(["hello"]) == 0 and len(posted) == 1
     assert "posted (HTTP 204)" in capsys.readouterr().err
+
+
+# A pipe into `grep -q` under pipefail is a false "no match": grep exits at the first match, the writer dies of SIGPIPE
+# (141), and pipefail makes the whole `if` false. Seen live on the kit's sandbox run (2026-11-12): setup.sh step 8
+# refused key-only SSH with "PubkeyAuthentication off" while `sshd -T` said yes (rc 141 reproduced). Write
+# `grep ... >/dev/null` instead: grep then reads to the end.
+PIPE_INTO_GREP_Q = re.compile(r"(?<!\|)\|&?(?!\|)\s*(?:\w+=\S+\s+)*(?:command\s+)?grep\s+(?:-\S+\s+)*(?:-[A-Za-z]*q|--quiet|--silent)")
+
+
+def test_no_pipe_into_grep_q_under_pipefail():
+    repo = HOST.parent
+    scripts = [*repo.glob("host/*.sh"), *repo.glob("host/lib/*.sh"), *repo.glob("host/bin/*"),
+               *repo.glob("deploy/*.sh"), *repo.glob("kit/*.sh"), *repo.glob("pack/*.sh"), *repo.glob("mod/*.sh"),
+               *repo.glob("host/world-copy/*.sh")]
+    hits = []
+    for f in scripts:
+        text = f.read_text(errors="replace")
+        # a sourced lib (host/lib) runs under its caller's pipefail without saying so
+        if "pipefail" not in text and f.parent.name != "lib":
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            if not line.lstrip().startswith("#") and PIPE_INTO_GREP_Q.search(line):
+                hits.append(f"{f.relative_to(repo)}:{n}: {line.strip()}")
+    assert scripts and not hits, "pipe into grep -q under pipefail (false no-match on SIGPIPE):\n" + "\n".join(hits)

@@ -9,7 +9,7 @@ from primary docs, and it has been clicked through end to end once: the proof ru
 **20** one-time steps: 18 from this list, plus a captcha on each bot's **Authorize**. Under the rule below, a
 captcha is one more click inside steps 13 and 16, not a step of its own, so the run's N is **18**. Step 23 (choose
 the pack) was added after the run, which makes **19** for a person like that one (who already had Discord). Step
-23 has not been measured live yet. Nor has a run with **no Discord** (operator ruling 2026-10-20: Discord is now a
+23 has not been measured live yet. Nor has a run with **no Discord** (design decision, 2026-10-20: Discord is now a
 choice at step 23): its 12 is counted from this list, not measured. `python3 kit/record.py human <id>` logs each
 step as it happens; a step not on this list is logged as `--unplanned`, and both go into the run record.
 
@@ -18,7 +18,7 @@ headings are the ids `kit/record.py` accepts; keep them stable.
 
 | Who | Steps | Count |
 |---|---|---|
-| You, once | 1–23 | **20** (19 if you already have Discord: step 9). **12 with no Discord** (steps 9–16 drop). Plus optional step 3, and conditional steps 19 (a Wi-Fi password, only for Wi-Fi) and 20 (a router range, only for a fixed address) |
+| You, once | 1–25 | **20** (19 if you already have Discord: step 9). **12 with no Discord** (steps 9–16 drop). Plus optional step 3, and conditional steps 19 (a Wi-Fi password, only for Wi-Fi), 20 (a router range, only for a fixed address), and 24–25 (SSH from your own computer, only for a headless setup) |
 | Each friend, once | F1–F10 | **10** (most friends already have F1, and some have F2). **9 with no Discord** (no F2) |
 | You, now and then | R1–R3 | 2 (**3 with no Discord**: R3, adding each friend to the server) |
 
@@ -27,7 +27,8 @@ the rest." Where 20 comes from, in one line: the kit's first design had 17 one-t
 9), plus two from the design decisions and the one-machine set-up (revoking the Tailscale token, 21, and logging back
 in after the test restart, 22), make 19 with Discord sign-up and 18 without; the proof run measured the 18 (its host
 had Discord). Choosing the pack (23) came after the run: 20 with step 9, 19 without. Steps 19 and 20 (a Wi-Fi
-password, a router range) are conditional and were never in the first design's 17. With no Discord (step 23's second
+password, a router range) are conditional and were never in the first design's 17, and so are 24 and 25 (the
+headless setup, added 2026-11-13); none of them is counted. With no Discord (step 23's second
 question, one more click on the same card, so no new step), steps 10–16 drop as well as 9: 19 − 7 = 12, and the
 promise is "you do about 12 things once, each friend does 9".
 
@@ -74,6 +75,55 @@ maker). Boot from the stick and run the installer (about 14 screens; it needs 25
 
 In the laptop's BIOS or UEFI setup, turn on the setting that powers the machine back on when power returns
 ("Restore on AC power loss" or similar). Not every laptop has it, and the name varies. **Unverified.**
+
+## You, once: from your other computer (only for a headless setup)
+
+The usual way is simplest: you sit at the laptop, and everything happens in its own terminal. If you'd rather do
+everything from your own computer, do these two steps after step 2, while you're still at the laptop's screen. From
+then on, every step that says "on the laptop, open a terminal" happens in an SSH window on your computer instead.
+Claude Code still runs on the laptop. Keep the laptop plugged in, and stay logged in at its desktop until Claude says
+its setup of the laptop (P7) is done; locking the screen is fine. After that the lid can stay closed. **Rehearsed once,
+P0 to P12 with no Discord (2026-11-14 to 15, a 16 GB VM): step 24 at the VM's own screen, and step 25 from a Linux
+computer through a port forward rather than a home-network address. The key check before P7 was tested both ways;
+after P7 password logins were refused and the key still worked; after the test restart the SSH reconnect worked, and
+the friend message and pack file copied over with `scp`. Not run yet: the Windows line, Claude Code on the laptop
+itself, Tailscale (P3), Discord, and a real person at the chair [verify live].**
+
+### 24. (Conditional) Turn on SSH on the laptop
+
+At the laptop's screen, open a terminal (Ctrl+Alt+T) and paste this. It asks for your password once:
+
+```sh
+sudo apt-get update && sudo apt-get install -y openssh-server tmux && sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target && whoami && hostname -I
+```
+
+It installs SSH and `tmux` (which keeps Claude running if your SSH window drops), and stops the laptop from going to
+sleep, which Claude would otherwise set up only later. If Ubuntu offers to upgrade to a newer version (a window
+saying "Upgrade Available"), click **Don't Upgrade**: the kit is tested on 24.04. The last two lines it prints are your **user name** and the
+laptop's addresses. Note the one that looks like `192.168.x.x` or `10.x.x.x`: that is the laptop on your home
+network. If your router can reserve an address for a device, reserve that one, so it doesn't change.
+
+### 25. (Conditional) Connect from your computer
+
+On your own computer, open a terminal (on Windows, PowerShell; on a Mac, Terminal). Run these **one line at a time**,
+with the user name and address from step 24:
+
+```sh
+ssh-keygen -t ed25519
+ssh-copy-id <user>@<address>
+ssh <user>@<address>
+```
+
+- `ssh-keygen`: press Enter at each question. If it says a key already exists, answer `n` and go on: you have one.
+- `ssh-copy-id` asks for the laptop's password one last time. Windows has no `ssh-copy-id`; there, run this line
+  instead of it:
+  `type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh <user>@<address> "umask 077; mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"`
+- The last line must connect **without asking for the laptop's password**. If it asks, the key didn't go in: stop
+  and run the middle line again. Later, Claude turns password logins off for good, and only this key will work.
+
+Once connected, run `tmux new -A -s kit`, and do steps 5 and 6 inside it. Every time you connect again, run the same
+`tmux new -A -s kit` to get back to Claude. Where a step says "second terminal window", open a second SSH window the
+same way, without tmux.
 
 ## You, once: Claude
 
@@ -230,6 +280,8 @@ When Claude says it is done with the token: in the console, **Settings** → **K
 
 Near the end, Claude restarts the laptop once to prove the server comes back by itself. Claude Code runs on the
 same laptop, so it closes too. When the laptop is back: log in, open a terminal, and run `claude --continue`.
+Headless (steps 24–25): your SSH window drops instead. Wait a couple of minutes, connect again at the address Claude
+gives you (it changes if you chose a fixed address), run `tmux new -A -s kit`, then `claude --continue`.
 
 ## You, once: network (only if needed)
 

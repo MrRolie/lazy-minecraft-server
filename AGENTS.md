@@ -6,7 +6,8 @@ doctrine. Everything here holds for every instance: the friends' live server, an
 (`docs/kit/KIT.md`, "The kit" below). An instance's own values live in its `kit.toml`.
 
 **The live server (asus-node)** has its instance record in `docs/instance/asus-node.md`: its status, host, address,
-guild, rollout steps and history. That file and the rest of the instance's own paths are listed in
+guild, rollout steps and history; what it still owes, who it waits on and its operating lessons are in
+`docs/instance/asus-node-open.md`. Those files and the rest of the instance's own paths are listed in
 `kit/INSTANCE-PATHS`. They are the original server's private record and are not in this copy
 (`kit/instance-check.sh` checks a copy without them).
 
@@ -22,13 +23,18 @@ guild, rollout steps and history. That file and the rest of the instance's own p
 | `kit/` | The instance config: `kit.toml` (repo root, gitignored; schema `kitconfig.py`, template `kit.example.toml`) and `render.py`, which renders it into `host/kit.env`, `host/rendered/systemd/` and keys in `.env` / `.env.bridge`. `kit/fixtures/example.toml` is a made-up instance the tests use; `kit/INSTANCE-PATHS` lists the live server's own paths (its `kit.toml` is `kit/fixtures/asus-node.toml`; private, not in this copy). The kit's tools, by phase, are listed in `kit/README.md`: `probe.sh` + `probe.py`, `sudoers.sh`, `packages.sh`, `tailscale.py`, `record.py` (a run's record, `kit/runs/`, gitignored) |
 | `discord/` | The Discord guild surface as code (`sync.py`, `layout.toml`, `content/*.md`; a kit guild's own content in `content/kit/`), and `bootstrap.py`, a kit guild's first steps |
 | `pack/` | The pack as code: `mods.toml` (the mods), `lock.json` (exact versions), `overrides/config/` (config edits), `build.py` |
-| `mod/` | `ve-commands`, the server-only Fabric mod (`/discovery`, `/coords`, the Discord bridge's file side); its contract is `mod/CONTRACT.md` |
+| `mod/` | `ve-commands`, the server-only Fabric mod (`/discovery`, `/coords`, the locator bar's 200-block cap with `/hide` and `/here`, the Discord bridge's file side); its contract is `mod/CONTRACT.md`, the locator bar is `mod/README.md` "Locator bar" |
 
 ## Updating a running server
 
 Any change that reaches a running server (a pull, a chapter, a fix) lands between play sessions (`rcon-cli list`
 first), never near 05:40, and with a fresh `deploy/backup.sh` before any server-side change (CLAUDE.md).
 
+- **How code reaches the host.** The host holds a plain checkout of this repo and needs no access to any remote.
+  A deploy is a bundle made in this repo, `git bundle create <f> main ^<host HEAD>`, copied to the host, and applied
+  there with `git pull --ff-only <f> main` under the gate below, so each deploy fast-forwards. A revert is a new
+  commit on `main`, deployed the same way. Each deploy is tagged in this repo, `deploy-YYYYMMDD` on the commit
+  deployed. The instance record has the exact commands.
 - **Pre-pull gate (before every `git pull`).** `docker-compose.yml` reads six keys from `.env` as
   `${KEY:-default}`, so a line for one of them that is already in `.env` goes live at the next `up -d minecraft`
   after the pull (mc-heal, the 05:40 mc-maint reboot, mc-server at boot), before render has run. Count them,
@@ -46,6 +52,30 @@ first), never near 05:40, and with a fresh `deploy/backup.sh` before any server-
   dry run, before any `--apply`.
 - **The kit's new-host tools are for a new laptop only** ("The kit" below): never run them on a server that is
   already up.
+
+## Working together
+
+On the live server, who decides what (the operator and the one session that works and merges this repo) is that
+instance's agreement, `docs/instance/working-together.md` (an instance path, private, not in this copy).
+
+## Working lessons (carry forward)
+
+- **Ask what an action causes, not only what it sets.** "Does the teardown restore what the command set?" is not
+  enough. Ask also what running it causes that the teardown never touches: fire, mob grief from natural spawns, item
+  loss on death, external writes. Ask whether any surface is beyond the allowlist's reach; a command allowlist cannot
+  reach natural spawns. The bar is possibility, not probability: one lightning strike or one creeper is enough. (The
+  AI DM's design review called thunder reversible and missed four such vectors; tag `mc-dm-v1`.)
+- **A guard test counts only once a mutation of the guard makes it fail.**
+  - Seed a competing rule before asserting order: an ordering check on an empty chain also passes with `-A` in
+    place of `-I 1`.
+  - Force each failure path with a shim, for example a PATH stub that exits 1.
+  - A mutation whose pattern no longer matches the code is a failed check, not a skip.
+  - Run each mutant with its own `PYTHONPYCACHEPREFIX`. Two same-size mutants written in the same second can reuse a
+    stale `.pyc`, so the mutant never runs and is reported as survived. (The bridge, 2026-10-02; the kit,
+    2026-10-15.)
+- **Parallel agents that drive a live target get private scratch:** `scratchpad/<agent-key>/`, and every helper names
+  its target. Before an irreversible choice, re-verify the result on the target itself. (2026-10-01 seed evaluation:
+  shared helper names sent one agent's RCON calls to another's container.)
 
 ## Hard-won server facts (carry forward; do not relitigate)
 
@@ -154,7 +184,8 @@ first), never near 05:40, and with a fresh `deploy/backup.sh` before any server-
   A live world is never tarred unflushed. Keep the timer disabled until the production world exists.
 - **The tar is written as `*.partial`,** checked with `gzip -t`, then renamed. An interrupted run leaves no
   valid-looking archive, and the next run deletes its `.partial`.
-- **Backups are on the same disk.** An off-host copy is still owed once friends have real progress.
+- **The kit's backups are on the same disk as the world.** A copy off that disk is the instance's job, not the
+  kit's; each instance records its own in its instance record.
 - **Install:** `sudo bash host/setup.sh` installs the units; `sudo bash host/setup.sh --stand-up` arms
   `mc-backup.timer` and `mc-server.service` at production stand-up (refused until the world, its pack and a first
   backup exist, and refused when an earlier step of the same run aborted).
@@ -441,7 +472,10 @@ The `bridge` compose service links the game and the guild. The details are in `b
   (gitignored; about 11 KB, since it references Modrinth downloads).
   - `--update` re-resolves every unpinned mod.
   - `pack/lock.json` is the committed reproducibility record: every mod of every chapter at an exact version
-    id.
+    id, with its `license` (Modrinth's project licence id). Every build prints the licence table of its mods. A
+    mod's licence is checked before the mod ships in a pack.
+  - Every jar, cached or downloaded, is checked against the lock's size and sha512 on every build. build.py stays
+    stdlib because it runs on kit laptops and the game host.
 - **Lint is fail-closed:** Modrinth "unsupported" sides, jar `environment`, per-side `depends` satisfaction
   (including jar-in-jar and version predicates), `breaks`, Modrinth-required projects, no
   `overrides/mods`, and nothing in `client-overrides/` but `servers.dat`.
@@ -647,17 +681,18 @@ boot; its `--pack`/`--world` rehearse a later pack change on a copy of the world
 `--stand-up` at P10). None of them is for a server that is already running ("Updating a running server"), except
 `kit/secret.py share-link`, which reads no kit.toml and is how any server rotates its share link. What is still open
 is KIT.md's own table. The first end-to-end run, and what it changed: `docs/kit/2026-10-16_proof-run-findings.md`.
-Discord is optional (operator ruling 2026-10-20): `kit.toml` `discord.enabled = false` skips P1, P6 and P11
+Discord is optional (design decision, 2026-10-20): `kit.toml` `discord.enabled = false` skips P1, P6 and P11
 (`kit/record.py skip`), drops human steps 9–16, turns alerts off, starts no bridge, and replaces P12's sync and invite
 with `kit/friends.py` (the friend message, written to a mode-600 file whose path is all it prints) and a whitelist the
 person asks for (HUMAN-STEPS R3). `discord/sync.py` and `discord/bootstrap.py` refuse on such a server. KIT.md "With
-no Discord"; not run live yet.
+no Discord"; run live once, with P3 untested and the P9 rings cut short (2026-11-13, `docs/kit/2026-11-13_no-discord-run-findings.md`).
 
 ## Verifying changes
 
 - `docker compose config -q` (the compose file parses)
-- `uv run --with pytest --with discord.py==2.7.1 pytest host/ pack/ discord/ bridge/ mod/ kit/`, and a clean
-  `python3 pack/build.py`.
+- The suite, run from the repo root:
+  `uv run -q --with pytest --with discord.py==2.7.1 pytest -q -p no:cacheprovider host/ pack/ discord/ bridge/ mod/ kit/`
+  (no failure, no error; `-rs` lists why anything skipped), and a clean `python3 pack/build.py`.
   - Without discord.py, `bridge/test_bridge.py` (the glue) skips. `test_core.py` and `test_contract.py` still
     run.
   - `test_contract.py` holds the bridge to `mod/contract-examples/` and FAILS if they are missing.

@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
@@ -53,7 +54,13 @@ public final class VeCommands implements DedicatedServerModInitializer {
 				LOG.info("COMMAND_MESSAGE from {} not forwarded (no contract event): {}",
 						source.getTextName(), message.signedContent()));
 
-		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> status(server, handler.player, true));
+		// The locator cap (Locator): its modifiers are transient, so they go on at every join and on the new player
+		// after every respawn (death or End exit), or the cap would lapse and a hidden player would show again.
+		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+			LocatorBar.apply(handler.player);
+			status(server, handler.player, true);
+		});
+		ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> LocatorBar.apply(newPlayer));
 		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> status(server, handler.player, false));
 	}
 
@@ -82,6 +89,7 @@ public final class VeCommands implements DedicatedServerModInitializer {
 		// the bridge needs the heartbeat most while nobody is on.
 		jobs = Jobs.start(inbox::poll, 1000, () -> server.execute(() -> status(server, null, false)), 60_000);
 		LOG.info("mcve contract v1 at {} (inbox offset {}, rotate at {} bytes)", mcve, inbox.offset(), rotate);
+		LOG.info("locator bar: friends' dots within {} blocks; /hide and /here on", Locator.blocks(LocatorBar.RANGE));
 	}
 
 	private void stopping(MinecraftServer server) {

@@ -22,3 +22,16 @@ discord/posts/
 docs/direction/
 docs/kit/research/
 docs/kit/2026-10-14_kit-plan.md
+
+# asus-node's open items and operating lessons (names the operator's machines and sessions)
+docs/instance/asus-node-open.md
+
+# how the operator and this repo's seat work together (names the operator's
+# machines and sessions)
+docs/instance/working-together.md
+
+# the dev machine's nightly pull of the world backup (asus-node.md "The world's second copy"): names that machine
+host/world-copy/
+
+# the reading of the pack's non-standard mod licences, for the operator
+docs/instance/licences.md

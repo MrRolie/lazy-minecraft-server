@@ -13,8 +13,9 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
 /**
- * /discovery &lt;text...&gt; and /coords &lt;name...&gt;, open to every player. Both use only vanilla argument types
- * (brigadier greedy string), so vanilla clients get them through the server's command tree.
+ * /discovery &lt;text...&gt; and /coords &lt;name...&gt;, plus the locator bar's /hide and /here, open to every player.
+ * They use only vanilla argument types (brigadier greedy string, or none), so vanilla clients get them through the
+ * server's command tree.
  */
 final class PlayerCommands {
 	private static final Cooldowns COOLDOWNS = new Cooldowns(10_000, System::nanoTime);
@@ -30,6 +31,50 @@ final class PlayerCommands {
 				.requires(Commands.hasPermission(Commands.LEVEL_ALL))
 				.then(Commands.argument("name", StringArgumentType.greedyString())
 						.executes(c -> run(c, events, "coords", "name", 60, "📌 Saved to #coords"))));
+		dispatcher.register(Commands.literal("hide")
+				.requires(Commands.hasPermission(Commands.LEVEL_ALL))
+				.executes(PlayerCommands::hide));
+		dispatcher.register(Commands.literal("here")
+				.requires(Commands.hasPermission(Commands.LEVEL_ALL))
+				.executes(PlayerCommands::here));
+	}
+
+	/** /hide: your own dot on or off for everyone (transmit only; what you see is untouched). */
+	private static int hide(CommandContext<CommandSourceStack> c) {
+		CommandSourceStack source = c.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.literal("/hide is for players in the game."));
+			return 0;
+		}
+		boolean hidden = Locator.toggleHide(LocatorBar.of(player));
+		source.sendSuccess(() -> Component.literal(Locator.hideMessage(hidden, LocatorBar.RANGE)), false);
+		return 1;
+	}
+
+	/**
+	 * /here: one chat line with your coordinates, sent to each player online, you included. A line of text, not a
+	 * marker: nothing appears on anyone's bar. Sent player by player, never broadcast: Fabric's GAME_MESSAGE fires on
+	 * PlayerList.broadcastSystemMessage only, so the line stays in the game and never reaches Discord.
+	 */
+	private static int here(CommandContext<CommandSourceStack> c) {
+		CommandSourceStack source = c.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.literal("/here is for players in the game."));
+			return 0;
+		}
+		long wait = COOLDOWNS.tryAcquire("here:" + player.getStringUUID());
+		if (wait > 0) {
+			source.sendSuccess(() -> Component.literal("Easy there! You can use /here again in " + wait + "s.")
+					.withStyle(ChatFormatting.GRAY), false);
+			return 0;
+		}
+		BlockPos pos = player.blockPosition();
+		Component line = Component.literal(Locator.hereLine(player.getGameProfile().name(),
+				player.level().dimension().identifier().toString(), pos.getX(), pos.getY(), pos.getZ()));
+		for (ServerPlayer to : source.getServer().getPlayerList().getPlayers()) to.sendSystemMessage(line);
+		return 1;
 	}
 
 	private static int run(CommandContext<CommandSourceStack> c, Supplier<EventLog> events, String command,

@@ -7,7 +7,9 @@ pack you pick with Claude.
 
 **Status: run end to end once.** The first full test run, on a fresh virtual machine (2026-10-16), went from a bare
 Ubuntu to friends' invite link. What it found is fixed (in code with tests, or in the docs), except one open finding
-(`docs/kit/2026-10-16_proof-run-findings.md`), and no run has gone through the fixes yet. Most numbers below are still estimates.
+(`docs/kit/2026-10-16_proof-run-findings.md`), and no run has gone through the fixes yet. Most numbers below are still estimates. The no-Discord choice ran once,
+on a throwaway VM with the Tailscale step untested (2026-11-13, `docs/kit/2026-11-13_no-discord-run-findings.md`); its
+counts still come from the step list.
 
 ## What you need
 
@@ -23,7 +25,7 @@ Ubuntu to friends' invite link. What it found is fixed (in code with tests, or i
   server with game chat, self-service whitelisting and alerts; with no Discord, Claude writes you one message to send
   your friends however you talk, and you add each friend by name. For each friend: Minecraft Java Edition and a free
   Tailscale account (and a Discord account, with Discord).
-- The laptop stays plugged in and switched on. It never sleeps; closing the lid is fine.
+- The laptop stays plugged in and switched on. It never sleeps once Claude has set it up (P7); from then on, closing the lid is fine. For a setup driven over SSH from your own computer, see `docs/kit/HUMAN-STEPS.md` steps 24–25.
 
 ## How long it takes
 

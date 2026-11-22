@@ -11,8 +11,12 @@
 (docs/kit/CUSTOM-PACK.md); --dir names another. The output is dist/<[pack] name, slugged>-<version>-ch<N>.mrpack.
 A custom pack has one chapter (a change is a [pack] version bump) and its [pack] name is checked (kit/kitconfig.py).
 
-The lock is the reproducibility record: a world is only restorable with the exact pack it was generated with.
-File hashes, URLs and sizes come from the Modrinth API (never computed); each download is checked against them.
+The lock is the reproducibility record: a world is only restorable with the exact pack it was generated with. It also
+records each mod's licence (Modrinth's project licence id), and every build prints the licence table of its mods.
+File hashes, URLs and sizes come from the Modrinth API (never computed). Every jar, cached or downloaded, is checked
+against them (size and sha512) on every build.
+It does its own fetch and check rather than use a separate hash-pin tool (one was considered, 2026-11-10): it
+runs on every kit laptop (KIT.md P5) and on the game host, where only the stdlib can be assumed.
 A frozen mod (worldgen: its update would change generation or generated content) never moves on --update.
 
 Fail-closed lint (any error -> no .mrpack), resolving each side the way Fabric Loader 0.19.5 does (see _lint_side):
@@ -200,6 +204,19 @@ def get(path):
     sys.exit(f"GET {path}: rate-limited")
 
 
+def licence_id(project, slug):
+    """Modrinth's licence id for a project (an SPDX id, or LicenseRef-...). Fail-closed: a missing one stops the build."""
+    lic = (project.get("license") or {}).get("id")
+    if not isinstance(lic, str) or not lic.strip():
+        sys.exit(f"{slug}: Modrinth gives no licence id; a mod's licence is checked before it ships")
+    return lic
+
+
+def project_licence(slug):
+    """-> the licence id of one mod's Modrinth project (backfills a lock entry that predates the licence field)."""
+    return licence_id(get(f"/project/{slug}"), slug)
+
+
 def resolve(slug, pin, mc, loader="fabric"):
     """-> lock entry for one mod."""
     project = get(f"/project/{slug}")
@@ -222,20 +239,37 @@ def resolve(slug, pin, mc, loader="fabric"):
             "version_type": v["version_type"], "date": v["date_published"][:10], "filename": f["filename"],
             "url": f["url"], "sha1": f["hashes"]["sha1"], "sha512": f["hashes"]["sha512"], "size": f["size"],
             "client_side": project["client_side"], "server_side": project["server_side"],
+            "license": licence_id(project, slug),
             "required_projects": sorted({d["project_id"] for d in v["dependencies"]
                                          if d["dependency_type"] == "required" and d.get("project_id")})}
 
 
+def pin_problem(data, entry):
+    """None if data is the locked file (Modrinth's size and sha512), else why not."""
+    if len(data) != entry["size"]:
+        return f"size {len(data)}, but the lock says {entry['size']}"
+    if hashlib.sha512(data).hexdigest() != entry["sha512"]:
+        return "sha512 mismatch against Modrinth"
+    return None
+
+
 def fetch(entry, cache):
+    """-> the jar's bytes, checked against the lock's size and sha512 on every build, cached or downloaded."""
     path = cache / f"{entry['sha1']}.jar"
-    if not path.exists():
-        req = urllib.request.Request(entry["url"], headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=300) as r:
-            data = r.read()
-        if hashlib.sha512(data).hexdigest() != entry["sha512"]:
-            sys.exit(f"{entry['filename']}: sha512 mismatch against Modrinth")
-        path.write_bytes(data)
-    return path.read_bytes()
+    if path.exists():
+        data = path.read_bytes()
+        if pin_problem(data, entry) is None:
+            return data
+    req = urllib.request.Request(entry["url"], headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        data = r.read()
+    problem = pin_problem(data, entry)
+    if problem:
+        sys.exit(f"{entry['filename']}: {problem}; nothing cached, no .mrpack written")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+    return data
 
 
 # ── Jar metadata ─────────────────────────────────────────────────────────────
@@ -412,6 +446,14 @@ def index(pack, mods, locks, version_id):
     }
 
 
+def licence_table(mods, locks):
+    """-> the markdown licence table of the mods in this build: slug, version, Modrinth licence id."""
+    rows = ["| mod | version | licence |", "| --- | --- | --- |"]
+    rows += [f"| {m['slug']} | {locks[m['slug']]['version_number']} | {locks[m['slug']]['license']} |"
+             for m in sorted(mods, key=lambda m: m["slug"])]
+    return "\n".join(rows)
+
+
 def load_manifest(text):
     data = tomllib.loads(text)
     mods = data["mod"]
@@ -427,8 +469,9 @@ def load_manifest(text):
     return data["pack"], mods
 
 
-def refresh_lock(lock, all_mods, mc, update, resolve=resolve):
-    """Resolve new mods and stale pins; with update, move unpinned, unfrozen mods to their newest release."""
+def refresh_lock(lock, all_mods, mc, update, resolve=resolve, licence=project_licence):
+    """Resolve new mods and stale pins; with update, move unpinned, unfrozen mods to their newest release. A locked
+    entry without a licence gets its project's, and nothing else about it moves."""
     for m in all_mods:  # lock EVERY chapter, so later chapters are pinned from day one
         cur = lock["mods"].get(m["slug"])
         stale_pin = cur and m.get("pin") and cur["version_id"] != m["pin"]
@@ -443,6 +486,9 @@ def refresh_lock(lock, all_mods, mc, update, resolve=resolve):
             if newest["version_id"] != cur["version_id"]:
                 print(f"  frozen {m['slug']}: keeping {cur['version_number']}"
                       f" (--update would pick {newest['version_number']}; worldgen mods move only by pin)")
+    for m in all_mods:
+        if "license" not in lock["mods"][m["slug"]]:
+            lock["mods"][m["slug"]]["license"] = licence(m["slug"])
     for slug in sorted(set(lock["mods"]) - {m["slug"] for m in all_mods}):
         print(f"  lock: dropping {slug} (no longer in mods.toml)")
         del lock["mods"][slug]
@@ -589,6 +635,8 @@ def main():
     n_server = sum(m["side"] != "client" for m in mods)
     n_client = sum(m["side"] != "server" for m in mods)
     print(f"{status} {out.relative_to(ROOT)}: {len(mods)} jars ({n_server} server, {n_client} client)")
+    print(f"licences (Modrinth project licence ids, from {src.name}/lock.json):")
+    print(licence_table(mods, lock["mods"]))
     return 0
 
 
